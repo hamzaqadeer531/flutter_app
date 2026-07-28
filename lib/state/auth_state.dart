@@ -1,0 +1,153 @@
+import 'dart:convert';
+
+import 'package:dio/dio.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import '../api/api_client.dart';
+import '../models/auth_models.dart';
+
+const _accessTokenKey = 'access_token';
+const _refreshTokenKey = 'refresh_token';
+
+/// Thrown for the two documented /auth/login failure responses so the
+/// Login screen can show the right message instead of a generic error.
+class AuthException implements Exception {
+  AuthException(this.message);
+  final String message;
+}
+
+class AuthState {
+  const AuthState({this.user, this.isLoading = false});
+
+  final AuthenticatedUser? user;
+  final bool isLoading;
+
+  bool get isAuthenticated => user != null;
+
+  AuthState copyWith({AuthenticatedUser? user, bool? isLoading, bool clearUser = false}) => AuthState(
+        user: clearUser ? null : (user ?? this.user),
+        isLoading: isLoading ?? this.isLoading,
+      );
+}
+
+class AuthController extends StateNotifier<AuthState> {
+  AuthController(this._apiClient, this._storage) : super(const AuthState(isLoading: true)) {
+    _apiClient.dio.interceptors.add(InterceptorsWrapper(onError: _handleDioError));
+    _restoreSession();
+  }
+
+  final ApiClient _apiClient;
+  final FlutterSecureStorage _storage;
+
+  /// Access tokens are short-lived (20 minutes server-side — see
+  /// config.py's access_token_expire_minutes) — any authenticated screen
+  /// left open past that gets a 401 on its next call. Transparently
+  /// rotates the refresh token and retries the failed request once;
+  /// only falls back to signing the user out if the refresh token
+  /// itself is also invalid, expired, or already used.
+  Future<void> _handleDioError(DioException error, ErrorInterceptorHandler handler) async {
+    final isUnauthorized = error.response?.statusCode == 401;
+    final isRefreshCall = error.requestOptions.path == '/auth/refresh';
+    if (!isUnauthorized || isRefreshCall) {
+      return handler.next(error);
+    }
+
+    final refreshToken = await _storage.read(key: _refreshTokenKey);
+    if (refreshToken == null) {
+      await _forceSignOut();
+      return handler.next(error);
+    }
+
+    try {
+      final response = await _apiClient.dio.post('/auth/refresh', data: {'refresh_token': refreshToken});
+      final token = TokenResponse.fromJson(response.data as Map<String, dynamic>);
+      await _persistAndActivate(token);
+
+      final retryOptions = error.requestOptions;
+      retryOptions.headers['Authorization'] = 'Bearer ${token.accessToken}';
+      final retryResponse = await _apiClient.dio.fetch(retryOptions);
+      return handler.resolve(retryResponse);
+    } on DioException {
+      await _forceSignOut();
+      return handler.next(error);
+    }
+  }
+
+  Future<void> _forceSignOut() async {
+    await _storage.delete(key: _accessTokenKey);
+    await _storage.delete(key: _refreshTokenKey);
+    _apiClient.dio.options.headers.remove('Authorization');
+    state = state.copyWith(clearUser: true, isLoading: false);
+  }
+
+  Future<void> _restoreSession() async {
+    final accessToken = await _storage.read(key: _accessTokenKey);
+    if (accessToken == null) {
+      state = const AuthState(isLoading: false);
+      return;
+    }
+    _apiClient.dio.options.headers['Authorization'] = 'Bearer $accessToken';
+    state = AuthState(user: _decodeUser(accessToken), isLoading: false);
+  }
+
+  Future<void> login(String email, String password) async {
+    state = state.copyWith(isLoading: true);
+    try {
+      final response = await _apiClient.dio.post(
+        '/auth/login',
+        data: {'email': email, 'password': password},
+      );
+      final token = TokenResponse.fromJson(response.data as Map<String, dynamic>);
+      await _persistAndActivate(token);
+    } on DioException catch (e) {
+      state = state.copyWith(isLoading: false);
+      if (e.response?.statusCode == 401) {
+        throw AuthException('Invalid email or password.');
+      }
+      if (e.response?.statusCode == 429) {
+        throw AuthException('Too many login attempts. Please try again later.');
+      }
+      throw AuthException('Could not reach the server. Check your connection and try again.');
+    }
+  }
+
+  Future<void> logout() async {
+    final refreshToken = await _storage.read(key: _refreshTokenKey);
+    if (refreshToken != null) {
+      try {
+        await _apiClient.dio.post('/auth/logout', data: {'refresh_token': refreshToken});
+      } on DioException {
+        // Best-effort revoke — proceed with local logout regardless.
+      }
+    }
+    await _forceSignOut();
+  }
+
+  Future<void> _persistAndActivate(TokenResponse token) async {
+    await _storage.write(key: _accessTokenKey, value: token.accessToken);
+    await _storage.write(key: _refreshTokenKey, value: token.refreshToken);
+    _apiClient.dio.options.headers['Authorization'] = 'Bearer ${token.accessToken}';
+    state = AuthState(user: _decodeUser(token.accessToken), isLoading: false);
+  }
+
+  /// Decodes the JWT payload locally (no signature verification — that's
+  /// the backend's job) purely to read sub/role/organization_id for the UI.
+  AuthenticatedUser _decodeUser(String jwt) {
+    final parts = jwt.split('.');
+    final payload = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1])))) as Map<String, dynamic>;
+    return AuthenticatedUser(
+      userId: payload['sub'] as String,
+      role: payload['role'] as String,
+      organizationId: payload['organization_id'] as String?,
+    );
+  }
+}
+
+final apiClientProvider = Provider<ApiClient>((ref) => ApiClient());
+
+final secureStorageProvider = Provider<FlutterSecureStorage>((ref) => const FlutterSecureStorage());
+
+final authControllerProvider = StateNotifierProvider<AuthController, AuthState>(
+  (ref) => AuthController(ref.watch(apiClientProvider), ref.watch(secureStorageProvider)),
+);
