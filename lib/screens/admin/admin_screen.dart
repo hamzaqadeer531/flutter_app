@@ -12,8 +12,8 @@ import '../../widgets/app_shell.dart';
 /// organizations/users CRUD API (Phase 6 Part L added org SCOPING to
 /// existing resources, not an org-management surface), so this screen
 /// is deliberately scoped to what genuinely exists today: license
-/// issue/list/revoke by organization ID (Phase 7 Part J) and the audit
-/// trail lookup by document ID (Phase 6 Part K). Building a fabricated
+/// issue/list/activate/validate/revoke by organization ID (Phase 7 Part
+/// J) and the audit trail lookup by document ID (Phase 6 Part K). Building a fabricated
 /// user/org management UI backed by nothing would be worse than being
 /// honest about the gap.
 class AdminScreen extends ConsumerStatefulWidget {
@@ -43,6 +43,10 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
   void dispose() {
     _orgIdController.dispose();
     _documentIdController.dispose();
+    _issueDurationController.dispose();
+    _issueMaxDevicesController.dispose();
+    _activationTokenController.dispose();
+    _deviceIdController.dispose();
     super.dispose();
   }
 
@@ -127,6 +131,76 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
       await _loadLicenses();
     } catch (error) {
       setState(() => _error = 'Revoke failed: $error');
+    }
+  }
+
+  String _issueTier = 'trial';
+  final _issueDurationController = TextEditingController();
+  final _issueMaxDevicesController = TextEditingController();
+  String? _issuedActivationToken;
+
+  /// POST /licenses/issue had no Flutter caller at all -- the org
+  /// license list could be viewed and revoked, but never created.
+  /// activation_token is shown once and highlighted since it's the only
+  /// thing a device needs to call /licenses/activate with -- there's no
+  /// "look it up again later" endpoint.
+  Future<void> _issueLicense() async {
+    final orgId = _orgIdController.text.trim();
+    if (orgId.isEmpty) {
+      setState(() => _error = 'Enter an organization ID first.');
+      return;
+    }
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.post('/licenses/issue', data: {
+        'organization_id': orgId,
+        'tier': _issueTier,
+        if (_issueDurationController.text.trim().isNotEmpty)
+          'duration_days': int.tryParse(_issueDurationController.text.trim()),
+        if (_issueMaxDevicesController.text.trim().isNotEmpty)
+          'max_devices': int.tryParse(_issueMaxDevicesController.text.trim()),
+      });
+      setState(() {
+        _issuedActivationToken = response.data['activation_token']?.toString();
+        _error = null;
+      });
+      await _loadLicenses();
+    } catch (error) {
+      setState(() => _error = 'Issue failed: $error');
+    }
+  }
+
+  final _activationTokenController = TextEditingController();
+  final _deviceIdController = TextEditingController();
+  String? _activationStatus;
+
+  Future<void> _activateLicense() async {
+    final token = _activationTokenController.text.trim();
+    final deviceId = _deviceIdController.text.trim();
+    if (token.isEmpty || deviceId.isEmpty) return;
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.post(
+        '/licenses/activate',
+        data: {'activation_token': token, 'device_id': deviceId},
+      );
+      setState(() => _activationStatus = 'Activated — status: ${response.data['status']}');
+    } catch (error) {
+      setState(() => _error = 'Activation failed: $error');
+    }
+  }
+
+  Future<void> _validateLicense(String licenseId) async {
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/licenses/$licenseId/validate');
+      setState(() => _error = null);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('License is ${response.data['status']}, expires ${response.data['expires_at'] ?? 'never'}.')),
+      );
+    } catch (error) {
+      setState(() => _error = 'Validation failed: $error');
     }
   }
 
@@ -230,6 +304,10 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
                     ),
                   ),
                   TextButton(
+                    onPressed: () => _validateLicense(license['id'].toString()),
+                    child: const Text('Validate'),
+                  ),
+                  TextButton(
                     onPressed: () => _revoke(license['id'].toString()),
                     child: const Text('Revoke', style: TextStyle(color: AppColors.red)),
                   ),
@@ -237,6 +315,88 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
               ),
             ),
           if (_licenses.isEmpty) Text('No licenses loaded.', style: TextStyle(color: AppColors.muted)),
+
+          const SizedBox(height: 20),
+          const Divider(),
+          const SizedBox(height: 12),
+          const Text('Issue a new license',
+              style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              DropdownButton<String>(
+                value: _issueTier,
+                items: const [
+                  DropdownMenuItem(value: 'trial', child: Text('Trial', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 'professional', child: Text('Professional', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 'enterprise', child: Text('Enterprise', style: TextStyle(fontSize: 12))),
+                ],
+                onChanged: (v) => setState(() => _issueTier = v ?? _issueTier),
+              ),
+              SizedBox(
+                width: 140,
+                child: TextField(
+                  controller: _issueDurationController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(hintText: 'Duration days (blank = perpetual)'),
+                ),
+              ),
+              SizedBox(
+                width: 140,
+                child: TextField(
+                  controller: _issueMaxDevicesController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(hintText: 'Max devices (blank = tier default)'),
+                ),
+              ),
+              ElevatedButton(onPressed: _issueLicense, child: const Text('Issue License')),
+            ],
+          ),
+          if (_issuedActivationToken != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: AppAlert(
+                kind: AppAlertKind.info,
+                message: 'Activation token (save this now — it is not shown again): $_issuedActivationToken',
+              ),
+            ),
+
+          const SizedBox(height: 20),
+          const Divider(),
+          const SizedBox(height: 12),
+          const Text('Activate a license on a device',
+              style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              SizedBox(
+                width: 260,
+                child: TextField(
+                  controller: _activationTokenController,
+                  decoration: const InputDecoration(hintText: 'Activation token'),
+                ),
+              ),
+              SizedBox(
+                width: 200,
+                child: TextField(
+                  controller: _deviceIdController,
+                  decoration: const InputDecoration(hintText: 'Device ID'),
+                ),
+              ),
+              ElevatedButton(onPressed: _activateLicense, child: const Text('Activate')),
+            ],
+          ),
+          if (_activationStatus != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: AppAlert(kind: AppAlertKind.info, message: _activationStatus!),
+            ),
         ],
       ),
     );
