@@ -230,13 +230,59 @@ class _DatasetManagerScreenState extends ConsumerState<DatasetManagerScreen> {
     }
   }
 
+  /// Terminal job states the shared job registry can report -- same set
+  /// workflow_state.dart polls for, kept in sync here for the same reason:
+  /// polling forever on an unrecognized terminal status is indistinguishable
+  /// from the app being stuck.
+  static const _terminalFailureStates = {'failed', 'cancelled', 'timed_out'};
+
+  bool _runningRegression = false;
+  Map<String, dynamic>? _latestRunResult;
+
+  /// Runs the pipeline against the whole active corpus and shows the
+  /// result -- previously this only fired POST /run-regression and showed
+  /// the job_id in a status message, with no way to ever see whether it
+  /// passed or what broke. POST /run-regression's response carries only a
+  /// job_id (its own regression run row's id is never returned), so the
+  /// only way to discover which run just completed is GET /statistics,
+  /// whose latest_run_id reflects the most-recently-created run
+  /// (services/regression_service.py::get_statistics orders by
+  /// created_at desc) -- reliable here since only one admin-triggered
+  /// run is expected in flight at a time from this screen.
   Future<void> _runRegression() async {
+    setState(() {
+      _runningRegression = true;
+      _latestRunResult = null;
+      _status = null;
+    });
     try {
       final dio = ref.read(apiClientProvider).dio;
       final response = await dio.post('/dataset-management/run-regression', data: {'dataset_version_id': null});
-      setState(() => _status = 'Regression run started (job ${response.data['job_id']}).');
+      final jobId = response.data['job_id'].toString();
+      while (true) {
+        await Future.delayed(const Duration(milliseconds: 800));
+        final statusResponse = await dio.get('/ocr/status/$jobId');
+        final status = statusResponse.data['status'] as String;
+        if (status == 'succeeded') break;
+        if (_terminalFailureStates.contains(status)) {
+          throw Exception(statusResponse.data['error_message'] ?? 'Regression run did not complete (status: $status).');
+        }
+      }
+
+      final statsResponse = await dio.get('/dataset-management/statistics');
+      final stats = statsResponse.data as Map<String, dynamic>;
+      setState(() => _stats = stats);
+
+      final runId = stats['latest_run_id'];
+      if (runId != null) {
+        final runResponse = await dio.get('/dataset-management/regression-runs/$runId');
+        setState(() => _latestRunResult = runResponse.data as Map<String, dynamic>);
+      }
+      setState(() => _status = 'Regression run complete.');
     } catch (error) {
       setState(() => _status = 'Regression run failed: $error');
+    } finally {
+      setState(() => _runningRegression = false);
     }
   }
 
@@ -541,7 +587,16 @@ class _DatasetManagerScreenState extends ConsumerState<DatasetManagerScreen> {
               const SizedBox(width: 10),
               ElevatedButton(onPressed: _createVersion, child: const Text('Snapshot Corpus')),
               const SizedBox(width: 10),
-              OutlinedButton(onPressed: _runRegression, child: const Text('Run Regression')),
+              OutlinedButton(
+                onPressed: _runningRegression ? null : _runRegression,
+                child: _runningRegression
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Run Regression'),
+              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -554,6 +609,41 @@ class _DatasetManagerScreenState extends ConsumerState<DatasetManagerScreen> {
                   style: TextStyle(fontSize: 12.5, color: AppColors.text)),
             ),
           if (_versions.isEmpty) Text('No versions snapshotted yet.', style: TextStyle(color: AppColors.muted)),
+          if (_latestRunResult != null) ...[
+            const SizedBox(height: 16),
+            const Text('Latest Run Result',
+                style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+            const SizedBox(height: 8),
+            _regressionResultCard(_latestRunResult!),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _regressionResultCard(Map<String, dynamic> run) {
+    final total = run['total_cases'] as int? ?? 0;
+    final passed = run['passed_cases'] as int? ?? 0;
+    final failed = run['failed_cases'] as int? ?? 0;
+    final metrics = run['metrics'] as Map<String, dynamic>? ?? {};
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: AppColors.gray, borderRadius: BorderRadius.circular(6)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Status: ${run['status']} · $passed / $total passed${failed > 0 ? ' · $failed failed' : ''}',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: failed > 0 ? AppColors.red : AppColors.green,
+              )),
+          if (metrics.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            for (final entry in metrics.entries)
+              Text('${entry.key}: ${entry.value}', style: TextStyle(fontSize: 12, color: AppColors.text)),
+          ],
         ],
       ),
     );
