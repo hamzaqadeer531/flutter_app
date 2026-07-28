@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -232,7 +233,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           (canBulkAct ? 3 : 2): const FixedColumnWidth(120),
           (canBulkAct ? 4 : 3): const FixedColumnWidth(120),
           (canBulkAct ? 5 : 4): const FixedColumnWidth(120),
-          (canBulkAct ? 6 : 5): const FixedColumnWidth(40),
+          (canBulkAct ? 6 : 5): const FixedColumnWidth(64),
         },
         border: TableBorder(horizontalInside: BorderSide(color: AppColors.border)),
         defaultVerticalAlignment: TableCellVerticalAlignment.middle,
@@ -279,7 +280,10 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 _editableCell(t, 'debit', _formatAmount(t.debit), color: AppColors.red),
                 _editableCell(t, 'credit', _formatAmount(t.credit), color: AppColors.green),
                 _editableCell(t, 'balance', _formatAmount(t.balance)),
-                _flagButton(t),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [_flagButton(t), _sourceButton(t)],
+                ),
               ],
             ),
         ],
@@ -403,6 +407,27 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     } finally {
       if (mounted) setState(() => _bulkActing = false);
     }
+  }
+
+  Widget _sourceButton(PipelineTransaction transaction) {
+    return IconButton(
+      icon: Icon(Icons.travel_explore_outlined, size: 16, color: AppColors.muted),
+      tooltip: 'Show OCR/layout/parser source for this row',
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(),
+      onPressed: () {
+        final documentId = ref.read(workflowControllerProvider).documentId;
+        if (documentId == null) return;
+        showDialog(
+          context: context,
+          builder: (context) => _SourceDialog(
+            dio: ref.read(apiClientProvider).dio,
+            documentId: documentId,
+            transaction: transaction,
+          ),
+        );
+      },
+    );
   }
 
   Widget _headerCell(String text) => Padding(
@@ -576,4 +601,171 @@ class _EditableCellState extends State<_EditableCell> {
       ),
     );
   }
+}
+
+/// Surfaces review.py's provenance drill-down (POST /review/{id}/
+/// transaction/ocr-source, layout-source, parser-source, compare) --
+/// built server-side (Phase 6 Part H) but previously unreachable from
+/// the app, since nothing ever called them.
+class _SourceDialog extends StatefulWidget {
+  const _SourceDialog({required this.dio, required this.documentId, required this.transaction});
+
+  final Dio dio;
+  final String documentId;
+  final PipelineTransaction transaction;
+
+  @override
+  State<_SourceDialog> createState() => _SourceDialogState();
+}
+
+class _SourceDialogState extends State<_SourceDialog> {
+  bool _loading = true;
+  String? _error;
+  List<dynamic> _ocrWords = [];
+  List<dynamic> _layoutElements = [];
+  List<dynamic> _parserLines = [];
+
+  String _compareField = 'description';
+  Map<String, dynamic>? _compareResult;
+  bool _comparing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final body = {'transaction_ref': widget.transaction.sourceCellIds};
+      final results = await Future.wait([
+        widget.dio.post('/review/${widget.documentId}/transaction/ocr-source', data: body),
+        widget.dio.post('/review/${widget.documentId}/transaction/layout-source', data: body),
+        widget.dio.post('/review/${widget.documentId}/transaction/parser-source', data: body),
+      ]);
+      setState(() {
+        _ocrWords = results[0].data as List<dynamic>;
+        _layoutElements = results[1].data as List<dynamic>;
+        _parserLines = results[2].data as List<dynamic>;
+      });
+    } catch (error) {
+      setState(() => _error = 'Could not load source: $error');
+    } finally {
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _compare() async {
+    setState(() {
+      _comparing = true;
+      _compareResult = null;
+    });
+    try {
+      final response = await widget.dio.post(
+        '/review/${widget.documentId}/transaction/compare',
+        data: {'transaction_ref': widget.transaction.sourceCellIds, 'field_name': _compareField},
+      );
+      setState(() => _compareResult = response.data as Map<String, dynamic>);
+    } catch (error) {
+      setState(() => _error = 'Compare failed: $error');
+    } finally {
+      setState(() => _comparing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Value Source & History'),
+      content: SizedBox(
+        width: 420,
+        child: _loading
+            ? const SizedBox(height: 80, child: Center(child: CircularProgressIndicator()))
+            : SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_error != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Text(_error!, style: TextStyle(color: AppColors.red, fontSize: 12)),
+                      ),
+                    _sourceSection(
+                      'OCR words',
+                      _ocrWords.isEmpty
+                          ? 'No OCR words recorded for this row.'
+                          : _ocrWords
+                              .map((w) => '"${w['text']}" (${((w['confidence'] as num) * 100).toStringAsFixed(0)}%)')
+                              .join(', '),
+                    ),
+                    _sourceSection(
+                      'Layout elements',
+                      _layoutElements.isEmpty
+                          ? 'No layout elements recorded for this row.'
+                          : _layoutElements.map((e) => e['text'] ?? e['id']).join(', '),
+                    ),
+                    _sourceSection(
+                      'Parser lines',
+                      _parserLines.isEmpty ? 'No parser source recorded for this row.' : _parserLines.join('\n'),
+                    ),
+                    const Divider(height: 24),
+                    const Text('Compare original vs. corrected',
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        DropdownButton<String>(
+                          value: _compareField,
+                          items: const [
+                            DropdownMenuItem(value: 'date_iso', child: Text('Date', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(
+                                value: 'description', child: Text('Description', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(value: 'debit', child: Text('Debit', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(value: 'credit', child: Text('Credit', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(value: 'balance', child: Text('Balance', style: TextStyle(fontSize: 12))),
+                          ],
+                          onChanged: (v) => setState(() => _compareField = v ?? _compareField),
+                        ),
+                        const SizedBox(width: 10),
+                        OutlinedButton(
+                          onPressed: _comparing ? null : _compare,
+                          child: Text(_comparing ? 'Comparing…' : 'Compare'),
+                        ),
+                      ],
+                    ),
+                    if (_compareResult != null) ...[
+                      const SizedBox(height: 8),
+                      Text('Original: ${_compareResult!['original_value'] ?? '—'}',
+                          style: const TextStyle(fontSize: 12)),
+                      Text('Corrected: ${_compareResult!['corrected_value'] ?? '—'}',
+                          style: const TextStyle(fontSize: 12)),
+                      Text('Versions: ${_compareResult!['version_count']}', style: const TextStyle(fontSize: 12)),
+                    ],
+                  ],
+                ),
+              ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+      ],
+    );
+  }
+
+  Widget _sourceSection(String title, String body) => Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(title, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+            const SizedBox(height: 4),
+            Text(body, style: TextStyle(fontSize: 11.5, color: AppColors.muted)),
+          ],
+        ),
+      );
 }
