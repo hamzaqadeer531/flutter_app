@@ -39,6 +39,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   /// _EditableCell's ValueKey below) and would otherwise lose the
   /// "just saved" checkmark the instant it appears.
   final Map<String, _CellStatus> _cellStatus = {};
+  bool _verifying = false;
 
   @override
   Widget build(BuildContext context) {
@@ -139,7 +140,27 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 OutlinedButton(onPressed: () => context.go('/upload'), child: const Text('← Back')),
-                ElevatedButton(onPressed: () => context.go('/summary'), child: const Text('Next: Analytics & Export →')),
+                Row(
+                  children: [
+                    Tooltip(
+                      message: workflow.documentTypeId == null
+                          ? 'This document could not be auto-classified, so it can\'t be verified.'
+                          : 'Marks this document verified and trains a template from it.',
+                      child: OutlinedButton(
+                        onPressed: workflow.documentTypeId == null || _verifying ? null : _verify,
+                        child: _verifying
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('✅ Verify Document'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ElevatedButton(onPressed: () => context.go('/summary'), child: const Text('Next: Analytics & Export →')),
+                  ],
+                ),
               ],
             ),
           ),
@@ -311,6 +332,22 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       if (!mounted) return;
       setState(() => _cellStatus[statusKey] = _CellStatus.error);
       _showError('Could not save: $error');
+    }
+  }
+
+  Future<void> _verify() async {
+    setState(() => _verifying = true);
+    try {
+      await ref.read(workflowControllerProvider.notifier).verifyDocument();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Document verified — template learning complete.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Verification failed: $error');
+    } finally {
+      if (mounted) setState(() => _verifying = false);
     }
   }
 

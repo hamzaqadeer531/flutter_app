@@ -10,6 +10,7 @@ class WorkflowState {
   const WorkflowState({
     this.stage = WorkflowStage.idle,
     this.documentId,
+    this.documentTypeId,
     this.filename,
     this.bank,
     this.progressMessage,
@@ -19,6 +20,12 @@ class WorkflowState {
 
   final WorkflowStage stage;
   final String? documentId;
+
+  /// Populated from DocumentUploadResponse.document_type_id -- null when
+  /// the document couldn't be auto-classified. Required by POST
+  /// /review/{id}/verify's request body, so verifyDocument() below can't
+  /// run without it.
+  final String? documentTypeId;
   final String? filename;
   final String? bank;
   final String? progressMessage;
@@ -30,6 +37,7 @@ class WorkflowState {
   WorkflowState copyWith({
     WorkflowStage? stage,
     String? documentId,
+    String? documentTypeId,
     String? filename,
     String? bank,
     String? progressMessage,
@@ -39,6 +47,7 @@ class WorkflowState {
     return WorkflowState(
       stage: stage ?? this.stage,
       documentId: documentId ?? this.documentId,
+      documentTypeId: documentTypeId ?? this.documentTypeId,
       filename: filename ?? this.filename,
       bank: bank ?? this.bank,
       progressMessage: progressMessage,
@@ -75,7 +84,13 @@ class WorkflowController extends StateNotifier<WorkflowState> {
       });
       final uploadResponse = await dio.post('/documents/upload', data: formData);
       final documentId = uploadResponse.data['document_id'] as String;
-      state = state.copyWith(documentId: documentId, stage: WorkflowStage.ocr, progressMessage: 'Reading document (OCR)...');
+      final documentTypeId = uploadResponse.data['document_type_id'] as String?;
+      state = state.copyWith(
+        documentId: documentId,
+        documentTypeId: documentTypeId,
+        stage: WorkflowStage.ocr,
+        progressMessage: 'Reading document (OCR)...',
+      );
       await _runOcrLayoutParse(dio, documentId, ocrEngine: ocrEngine, forceReprocess: false);
     } catch (error) {
       state = state.copyWith(stage: WorkflowStage.failed, errorMessage: error.toString());
@@ -245,6 +260,29 @@ class WorkflowController extends StateNotifier<WorkflowState> {
         if (note != null && note.isNotEmpty) 'note': note,
       },
     );
+  }
+
+  /// Marks the document verified -- POST /review/{id}/verify -- which
+  /// kicks off backend template learning as a background job. Requires
+  /// documentTypeId, which only became reliably non-null once the backend
+  /// started seeding a DocumentType row per plugin at startup and
+  /// resolving it on upload; before that this endpoint had no valid
+  /// document_type_id any client could ever supply. Reuses _pollOcrJob
+  /// since the job registry (and its status/error shape) is shared
+  /// across every background job, not OCR-specific.
+  Future<void> verifyDocument() async {
+    final documentId = state.documentId;
+    final documentTypeId = state.documentTypeId;
+    if (documentId == null || documentTypeId == null) {
+      throw StateError('This document has no confirmed type to verify.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    final response = await dio.post(
+      '/review/$documentId/verify',
+      data: {'document_type_id': documentTypeId},
+    );
+    final jobId = response.data['job_id'] as String;
+    await _pollOcrJob(dio, jobId);
   }
 
   void reset() => state = const WorkflowState();
