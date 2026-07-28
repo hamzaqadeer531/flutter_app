@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
@@ -238,6 +239,52 @@ class _DatasetManagerScreenState extends ConsumerState<DatasetManagerScreen> {
 
   bool _runningRegression = false;
   Map<String, dynamic>? _latestRunResult;
+
+  String? _exportVersionId;
+  bool _exporting = false;
+
+  /// POST /dataset-management/export -- built server-side (DatasetExportService)
+  /// but with no Flutter caller at all until now. 'json_bundle' writes a
+  /// local file the admin picks a location for (same saveFile pattern as
+  /// reports_screen.dart's Excel export); 'regression_folder_sync' writes
+  /// server-side into the regression corpus directory, so there's nothing
+  /// to save locally -- just report which paths it wrote.
+  Future<void> _exportVersion(String exportFormat) async {
+    final versionId = _exportVersionId;
+    if (versionId == null) return;
+    setState(() {
+      _exporting = true;
+      _status = null;
+    });
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.post(
+        '/dataset-management/export',
+        data: {'dataset_version_id': versionId, 'export_format': exportFormat},
+      );
+      if (exportFormat == 'json_bundle') {
+        final bundles = response.data['bundles'] as List<dynamic>;
+        final savePath = await FilePicker.platform.saveFile(
+          dialogTitle: 'Save dataset JSON bundle',
+          fileName: 'dataset_bundle_$versionId.json',
+        );
+        if (savePath == null) {
+          setState(() => _status = 'Export cancelled.');
+          return;
+        }
+        await File(savePath).writeAsString(const JsonEncoder.withIndent('  ').convert(bundles));
+        setState(() => _status = 'Saved ${bundles.length} document bundle(s) to $savePath');
+      } else {
+        final writtenPaths = response.data['written_paths'] as List<dynamic>;
+        setState(() => _status = 'Synced ${writtenPaths.length} file(s) to the regression folder:\n'
+            '${writtenPaths.join('\n')}');
+      }
+    } catch (error) {
+      setState(() => _status = 'Export failed: $error');
+    } finally {
+      setState(() => _exporting = false);
+    }
+  }
 
   /// Runs the pipeline against the whole active corpus and shows the
   /// result -- previously this only fired POST /run-regression and showed
@@ -609,6 +656,38 @@ class _DatasetManagerScreenState extends ConsumerState<DatasetManagerScreen> {
                   style: TextStyle(fontSize: 12.5, color: AppColors.text)),
             ),
           if (_versions.isEmpty) Text('No versions snapshotted yet.', style: TextStyle(color: AppColors.muted)),
+          if (_versions.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const Text('Export', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                DropdownButton<String>(
+                  hint: const Text('Choose a version', style: TextStyle(fontSize: 12)),
+                  value: _exportVersionId,
+                  items: [
+                    for (final v in _versions)
+                      DropdownMenuItem(
+                        value: v['id'].toString(),
+                        child: Text('${v['version_label']}', style: const TextStyle(fontSize: 12)),
+                      ),
+                  ],
+                  onChanged: (v) => setState(() => _exportVersionId = v),
+                ),
+                const SizedBox(width: 10),
+                OutlinedButton(
+                  onPressed: _exportVersionId == null || _exporting ? null : () => _exportVersion('json_bundle'),
+                  child: const Text('Export JSON Bundle'),
+                ),
+                const SizedBox(width: 10),
+                OutlinedButton(
+                  onPressed:
+                      _exportVersionId == null || _exporting ? null : () => _exportVersion('regression_folder_sync'),
+                  child: const Text('Sync to Regression Folder'),
+                ),
+              ],
+            ),
+          ],
           if (_latestRunResult != null) ...[
             const SizedBox(height: 16),
             const Text('Latest Run Result',
