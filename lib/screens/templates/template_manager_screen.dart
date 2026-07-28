@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -29,6 +33,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
   Map<String, dynamic>? _template;
   String? _error;
   bool _loading = false;
+  List<dynamic>? _lineage;
 
   @override
   void dispose() {
@@ -46,7 +51,10 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
     try {
       final dio = ref.read(apiClientProvider).dio;
       final response = await dio.get('/templates/$id');
-      setState(() => _template = response.data as Map<String, dynamic>);
+      setState(() {
+        _template = response.data as Map<String, dynamic>;
+        _lineage = null;
+      });
     } catch (error) {
       setState(() {
         _error = 'Template not found or could not be loaded.';
@@ -69,6 +77,118 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
     }
   }
 
+  Future<String?> _promptForName(String title, String hint) {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(controller: controller, autofocus: true, decoration: InputDecoration(hintText: hint)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _rename() async {
+    final id = _template?['id'];
+    if (id == null) return;
+    final newName = await _promptForName('Rename template', 'New name');
+    if (newName == null || newName.isEmpty) return;
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.post('/templates/$id/rename', data: {'new_name': newName});
+      setState(() => _template = response.data as Map<String, dynamic>);
+    } catch (error) {
+      setState(() => _error = 'Rename failed: $error');
+    }
+  }
+
+  /// Fixes a pre-existing bug: this previously called _action('clone')
+  /// with no request body, but POST /templates/{id}/clone requires
+  /// {new_name} -- every clone attempt would 422.
+  Future<void> _clone() async {
+    final id = _template?['id'];
+    if (id == null) return;
+    final newName = await _promptForName('Clone template', 'Name for the clone');
+    if (newName == null || newName.isEmpty) return;
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.post('/templates/$id/clone', data: {'new_name': newName});
+      setState(() => _template = response.data as Map<String, dynamic>);
+    } catch (error) {
+      setState(() => _error = 'Clone failed: $error');
+    }
+  }
+
+  Future<void> _exportTemplate() async {
+    final id = _template?['id'];
+    if (id == null) return;
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/templates/$id/export');
+      final bundle = response.data['bundle'];
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save template bundle',
+        fileName: 'template_${_template!['name']}_v${_template!['version']}.json',
+      );
+      if (savePath == null) return;
+      await File(savePath).writeAsString(const JsonEncoder.withIndent('  ').convert(bundle));
+      setState(() => _error = null);
+    } catch (error) {
+      setState(() => _error = 'Export failed: $error');
+    }
+  }
+
+  Future<void> _importTemplate() async {
+    final picked = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['json']);
+    final path = picked?.files.single.path;
+    if (path == null) return;
+    try {
+      final bundle = jsonDecode(await File(path).readAsString()) as Map<String, dynamic>;
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.post('/templates/import', data: {'bundle': bundle});
+      setState(() {
+        _template = response.data as Map<String, dynamic>;
+        _idController.text = _template!['id'].toString();
+        _lineage = null;
+        _error = null;
+      });
+    } catch (error) {
+      setState(() => _error = 'Import failed: $error');
+    }
+  }
+
+  Future<void> _loadLineage() async {
+    final lineageId = _template?['lineage_id'];
+    if (lineageId == null) return;
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/templates/lineage/$lineageId');
+      setState(() => _lineage = response.data as List<dynamic>);
+    } catch (error) {
+      setState(() => _error = 'Could not load lineage: $error');
+    }
+  }
+
+  Future<void> _rollback(int targetVersion) async {
+    final lineageId = _template?['lineage_id'];
+    if (lineageId == null) return;
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response =
+          await dio.post('/templates/lineage/$lineageId/rollback', data: {'target_version': targetVersion});
+      setState(() {
+        _template = response.data as Map<String, dynamic>;
+        _lineage = null;
+      });
+    } catch (error) {
+      setState(() => _error = 'Rollback failed: $error');
+    }
+  }
+
   Future<void> _delete() async {
     final id = _template?['id'];
     if (id == null) return;
@@ -77,6 +197,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
       await dio.delete('/templates/$id');
       setState(() {
         _template = null;
+        _lineage = null;
         _idController.clear();
       });
     } catch (error) {
@@ -117,6 +238,8 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
                       ),
                       const SizedBox(width: 10),
                       ElevatedButton(onPressed: _loading ? null : _lookup, child: const Text('Look Up')),
+                      const SizedBox(width: 10),
+                      OutlinedButton(onPressed: _importTemplate, child: const Text('Import from File')),
                     ],
                   ),
                   if (_error != null)
@@ -149,7 +272,10 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
                         OutlinedButton(onPressed: () => _action('activate'), child: const Text('Activate')),
                         OutlinedButton(onPressed: () => _action('deactivate'), child: const Text('Deactivate')),
                         OutlinedButton(onPressed: () => _action('archive'), child: const Text('Archive')),
-                        OutlinedButton(onPressed: () => _action('clone'), child: const Text('Clone')),
+                        OutlinedButton(onPressed: _rename, child: const Text('Rename')),
+                        OutlinedButton(onPressed: _clone, child: const Text('Clone')),
+                        OutlinedButton(onPressed: _exportTemplate, child: const Text('Export')),
+                        OutlinedButton(onPressed: _loadLineage, child: const Text('View Lineage')),
                         OutlinedButton(
                           onPressed: _delete,
                           style: OutlinedButton.styleFrom(foregroundColor: AppColors.red),
@@ -157,6 +283,34 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
                         ),
                       ],
                     ),
+                    if (_lineage != null) ...[
+                      const SizedBox(height: 16),
+                      const Text('Lineage (rollback to any prior version)',
+                          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+                      const SizedBox(height: 8),
+                      for (final v in _lineage!)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'v${v['version']} · ${v['is_active'] == true ? 'active' : 'inactive'}'
+                                  '${v['id'] == _template!['id'] ? ' (current)' : ''}',
+                                  style: const TextStyle(fontSize: 12.5, color: AppColors.text),
+                                ),
+                              ),
+                              if (v['id'] != _template!['id'])
+                                TextButton(
+                                  onPressed: () => _rollback(v['version'] as int),
+                                  child: const Text('Roll back to this version'),
+                                ),
+                            ],
+                          ),
+                        ),
+                      if (_lineage!.isEmpty)
+                        Text('No lineage history found.', style: TextStyle(color: AppColors.muted)),
+                    ],
                   ],
                 ),
               ),
