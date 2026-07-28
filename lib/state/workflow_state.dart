@@ -71,7 +71,7 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     try {
       final formData = FormData.fromMap({
         'file': await MultipartFile.fromFile(filePath, filename: filename),
-        if (bank != null) 'bank_hint': bank,
+        if (bank != null) 'bank_hint': bank, // ignore: use_null_aware_elements
       });
       final uploadResponse = await dio.post('/documents/upload', data: formData);
       final documentId = uploadResponse.data['document_id'] as String;
