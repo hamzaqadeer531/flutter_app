@@ -262,6 +262,59 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     );
   }
 
+  /// Groups by pageNumber since the backend's bulk endpoints take a single
+  /// page_number per request -- a selection spanning multiple pages of a
+  /// real statement needs one call per page.
+  Map<int, List<PipelineTransaction>> _groupByPage(List<PipelineTransaction> transactions) {
+    final byPage = <int, List<PipelineTransaction>>{};
+    for (final t in transactions) {
+      byPage.putIfAbsent(t.pageNumber, () => []).add(t);
+    }
+    return byPage;
+  }
+
+  /// Approves a batch of transactions at once -- POST /review/{id}/
+  /// transaction/bulk-approve -- confirming their classifications stand
+  /// without touching any field value. Backend gates this to reviewer/
+  /// admin roles (services/review_service.py via require_role), so the
+  /// Review screen only shows the bulk actions to those roles.
+  Future<void> bulkApproveTransactions(List<PipelineTransaction> transactions) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to bulk-approve transactions on.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    for (final entry in _groupByPage(transactions).entries) {
+      await dio.post(
+        '/review/$documentId/transaction/bulk-approve',
+        data: {
+          'page_number': entry.key,
+          'transaction_refs': entry.value.map((t) => t.sourceCellIds).toList(),
+        },
+      );
+    }
+  }
+
+  /// Rejects a batch of transactions at once -- POST /review/{id}/
+  /// transaction/bulk-reject -- same reviewer/admin gate as bulk-approve.
+  Future<void> bulkRejectTransactions(List<PipelineTransaction> transactions, {String? note}) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to bulk-reject transactions on.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    for (final entry in _groupByPage(transactions).entries) {
+      await dio.post(
+        '/review/$documentId/transaction/bulk-reject',
+        data: {
+          'page_number': entry.key,
+          'transaction_refs': entry.value.map((t) => t.sourceCellIds).toList(),
+          if (note != null && note.isNotEmpty) 'note': note, // ignore: use_null_aware_elements
+        },
+      );
+    }
+  }
+
   /// Marks the document verified -- POST /review/{id}/verify -- which
   /// kicks off backend template learning as a background job. Requires
   /// documentTypeId, which only became reliably non-null once the backend

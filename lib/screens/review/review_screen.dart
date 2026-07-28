@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../models/pipeline_models.dart';
+import '../../state/auth_state.dart';
 import '../../state/workflow_state.dart';
 import '../../theme/app_colors.dart';
 import '../../widgets/app_card.dart';
@@ -41,10 +42,18 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   final Map<String, _CellStatus> _cellStatus = {};
   bool _verifying = false;
 
+  /// Keyed by rowKey -- bulk-approve/bulk-reject (POST /review/{id}/
+  /// transaction/bulk-approve|bulk-reject) is gated server-side to
+  /// reviewer/admin roles, so the selection UI is only shown to them.
+  final Set<String> _selectedRowKeys = {};
+  bool _bulkActing = false;
+
   @override
   Widget build(BuildContext context) {
     final workflow = ref.watch(workflowControllerProvider);
     final statement = workflow.statement;
+    final role = ref.watch(authControllerProvider).user?.role;
+    final canBulkAct = role == 'reviewer' || role == 'admin';
 
     if (statement == null) {
       return AppShell(
@@ -120,6 +129,34 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                             style: TextStyle(fontSize: 12, color: AppColors.muted)),
                       ],
                     ),
+                    if (canBulkAct && _selectedRowKeys.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Text('${_selectedRowKeys.length} selected',
+                              style: TextStyle(fontSize: 12, color: AppColors.muted)),
+                          const SizedBox(width: 10),
+                          OutlinedButton(
+                            onPressed: _bulkActing ? null : () => _bulkApprove(txns),
+                            child: const Text('Approve Selected', style: TextStyle(fontSize: 12)),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton(
+                            onPressed: _bulkActing ? null : () => _bulkReject(txns),
+                            style: OutlinedButton.styleFrom(foregroundColor: AppColors.red),
+                            child: const Text('Reject Selected', style: TextStyle(fontSize: 12)),
+                          ),
+                          if (_bulkActing) ...[
+                            const SizedBox(width: 10),
+                            const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 14),
                     Expanded(
                       child: txns.isEmpty
@@ -127,7 +164,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                               child: Text('No transactions match this filter.',
                                   style: TextStyle(color: AppColors.muted)),
                             )
-                          : _buildTable(txns),
+                          : _buildTable(txns, canBulkAct),
                     ),
                   ],
                 ),
@@ -183,16 +220,19 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
-  Widget _buildTable(List<PipelineTransaction> transactions) {
+  Widget _buildTable(List<PipelineTransaction> transactions, bool canBulkAct) {
+    final allSelected = canBulkAct && transactions.isNotEmpty &&
+        transactions.every((t) => _selectedRowKeys.contains(t.rowKey));
     return SingleChildScrollView(
       child: Table(
-        columnWidths: const {
-          0: FixedColumnWidth(110),
-          1: FlexColumnWidth(),
-          2: FixedColumnWidth(120),
-          3: FixedColumnWidth(120),
-          4: FixedColumnWidth(120),
-          5: FixedColumnWidth(40),
+        columnWidths: {
+          if (canBulkAct) 0: const FixedColumnWidth(32),
+          (canBulkAct ? 1 : 0): const FixedColumnWidth(110),
+          (canBulkAct ? 2 : 1): const FlexColumnWidth(),
+          (canBulkAct ? 3 : 2): const FixedColumnWidth(120),
+          (canBulkAct ? 4 : 3): const FixedColumnWidth(120),
+          (canBulkAct ? 5 : 4): const FixedColumnWidth(120),
+          (canBulkAct ? 6 : 5): const FixedColumnWidth(40),
         },
         border: TableBorder(horizontalInside: BorderSide(color: AppColors.border)),
         defaultVerticalAlignment: TableCellVerticalAlignment.middle,
@@ -200,6 +240,18 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           TableRow(
             decoration: const BoxDecoration(color: AppColors.navy),
             children: [
+              if (canBulkAct)
+                Checkbox(
+                  value: allSelected,
+                  fillColor: WidgetStateProperty.all(Colors.white),
+                  onChanged: (checked) => setState(() {
+                    if (checked ?? false) {
+                      _selectedRowKeys.addAll(transactions.map((t) => t.rowKey));
+                    } else {
+                      _selectedRowKeys.removeAll(transactions.map((t) => t.rowKey));
+                    }
+                  }),
+                ),
               _headerCell('Date'),
               _headerCell('Description'),
               _headerCell('Debit'),
@@ -211,6 +263,17 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           for (final t in transactions)
             TableRow(
               children: [
+                if (canBulkAct)
+                  Checkbox(
+                    value: _selectedRowKeys.contains(t.rowKey),
+                    onChanged: (checked) => setState(() {
+                      if (checked ?? false) {
+                        _selectedRowKeys.add(t.rowKey);
+                      } else {
+                        _selectedRowKeys.remove(t.rowKey);
+                      }
+                    }),
+                  ),
                 _editableCell(t, 'date_iso', t.dateIso ?? ''),
                 _editableCell(t, 'description', t.description, alignLeft: true),
                 _editableCell(t, 'debit', _formatAmount(t.debit), color: AppColors.red),
@@ -274,6 +337,71 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     } catch (error) {
       if (!mounted) return;
       _showError('Could not flag this row: $error');
+    }
+  }
+
+  Future<void> _bulkApprove(List<PipelineTransaction> visibleTransactions) async {
+    final selected = visibleTransactions.where((t) => _selectedRowKeys.contains(t.rowKey)).toList();
+    if (selected.isEmpty) return;
+    setState(() => _bulkActing = true);
+    try {
+      await ref.read(workflowControllerProvider.notifier).bulkApproveTransactions(selected);
+      if (!mounted) return;
+      setState(() => _selectedRowKeys.clear());
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${selected.length} transaction(s) approved.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not approve selection: $error');
+    } finally {
+      if (mounted) setState(() => _bulkActing = false);
+    }
+  }
+
+  Future<void> _bulkReject(List<PipelineTransaction> visibleTransactions) async {
+    final selected = visibleTransactions.where((t) => _selectedRowKeys.contains(t.rowKey)).toList();
+    if (selected.isEmpty) return;
+
+    final controller = TextEditingController();
+    final note = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Reject ${selected.length} transaction(s)'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Optional note (why are these rejected?)'),
+          maxLines: 3,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Reject'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (note == null) return; // cancelled
+
+    setState(() => _bulkActing = true);
+    try {
+      await ref.read(workflowControllerProvider.notifier).bulkRejectTransactions(
+            selected,
+            note: note.isEmpty ? null : note,
+          );
+      if (!mounted) return;
+      setState(() => _selectedRowKeys.clear());
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${selected.length} transaction(s) rejected.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not reject selection: $error');
+    } finally {
+      if (mounted) setState(() => _bulkActing = false);
     }
   }
 
