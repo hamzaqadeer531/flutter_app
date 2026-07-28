@@ -29,13 +29,82 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
   final _documentIdController = TextEditingController();
   List<dynamic> _licenses = [];
   List<dynamic> _auditEntries = [];
+  List<dynamic> _suggestions = [];
+  bool _loadingSuggestions = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSuggestions();
+  }
 
   @override
   void dispose() {
     _orgIdController.dispose();
     _documentIdController.dispose();
     super.dispose();
+  }
+
+  /// GET /review/suggestions/pending -- learned rule suggestions
+  /// (learning/rule_learning) waiting for a reviewer/admin to accept
+  /// (activates a real Rule for a document type) or reject them.
+  Future<void> _loadSuggestions() async {
+    setState(() => _loadingSuggestions = true);
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/review/suggestions/pending');
+      setState(() => _suggestions = response.data as List<dynamic>);
+    } catch (error) {
+      setState(() => _error = 'Could not load suggestions: $error');
+    } finally {
+      setState(() => _loadingSuggestions = false);
+    }
+  }
+
+  Future<void> _acceptSuggestion(String suggestionId) async {
+    final controller = TextEditingController();
+    final documentTypeId = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Accept suggestion'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Document type ID (UUID) this rule applies to'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Accept'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (documentTypeId == null || documentTypeId.isEmpty) return;
+
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      await dio.post(
+        '/review/suggestions/$suggestionId/accept',
+        data: {'document_type_id': documentTypeId},
+      );
+      await _loadSuggestions();
+    } catch (error) {
+      setState(() => _error = 'Accept failed: $error');
+    }
+  }
+
+  Future<void> _rejectSuggestion(String suggestionId) async {
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      await dio.post('/review/suggestions/$suggestionId/reject');
+      await _loadSuggestions();
+    } catch (error) {
+      setState(() => _error = 'Reject failed: $error');
+    }
   }
 
   Future<void> _loadLicenses() async {
@@ -89,12 +158,13 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
                   const AppCardHeader(
                     icon: '🛡️',
                     title: 'Administration',
-                    subtitle: 'License management and audit trail lookup.',
+                    subtitle: 'License management, audit trail lookup, and learned rule suggestions.',
                   ),
                   Row(
                     children: [
                       _tabButton('Licenses', 0),
                       _tabButton('Audit Trail', 1),
+                      _tabButton('Rule Suggestions', 2),
                     ],
                   ),
                   if (_error != null)
@@ -107,6 +177,7 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
             ),
             if (_tab == 0) _licensesTab(),
             if (_tab == 1) _auditTab(),
+            if (_tab == 2) _suggestionsTab(),
           ],
         ),
       ),
@@ -199,6 +270,67 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
               ),
             ),
           if (_auditEntries.isEmpty) Text('No audit entries loaded.', style: TextStyle(color: AppColors.muted)),
+        ],
+      ),
+    );
+  }
+
+  Widget _suggestionsTab() {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Learned corrections waiting for review',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.heading)),
+              OutlinedButton(
+                onPressed: _loadingSuggestions ? null : _loadSuggestions,
+                child: Text(_loadingSuggestions ? 'Loading…' : 'Reload'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (_suggestions.isEmpty)
+            Text('No pending suggestions.', style: TextStyle(color: AppColors.muted))
+          else
+            for (final s in _suggestions)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: AppColors.gray, borderRadius: BorderRadius.circular(6)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('${s['field_name']} · ${s['supporting_correction_count']} supporting correction(s)',
+                          style: const TextStyle(
+                              fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.heading)),
+                      const SizedBox(height: 4),
+                      Text('When: ${s['suggested_condition']}', style: TextStyle(fontSize: 11.5, color: AppColors.muted)),
+                      Text('Then: ${s['suggested_action']}', style: TextStyle(fontSize: 11.5, color: AppColors.muted)),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          ElevatedButton(
+                            onPressed: () => _acceptSuggestion(s['id'].toString()),
+                            child: const Text('Accept', style: TextStyle(fontSize: 12)),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton(
+                            onPressed: () => _rejectSuggestion(s['id'].toString()),
+                            style: OutlinedButton.styleFrom(foregroundColor: AppColors.red),
+                            child: const Text('Reject', style: TextStyle(fontSize: 12)),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
         ],
       ),
     );
