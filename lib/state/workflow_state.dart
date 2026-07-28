@@ -215,6 +215,38 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     state = state.copyWith(statement: statement.copyWith(transactions: updatedTransactions));
   }
 
+  /// Flags one transaction row as having an OCR, parser, or
+  /// classification problem -- POST /review/{id}/mark-{kind}-error.
+  /// Doesn't touch WorkflowState.statement: this records an annotation
+  /// for the review/correction-learning trail, it doesn't change any
+  /// field's value (unlike editTransactionField above).
+  Future<void> markTransactionError({
+    required PipelineTransaction transaction,
+    required String errorKind, // 'ocr' | 'parser' | 'classification'
+    String? note,
+  }) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to flag a transaction on.');
+    }
+    final endpoint = switch (errorKind) {
+      'ocr' => 'mark-ocr-error',
+      'parser' => 'mark-parser-error',
+      'classification' => 'mark-classification-error',
+      _ => throw ArgumentError('Unknown errorKind: $errorKind'),
+    };
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post(
+      '/review/$documentId/$endpoint',
+      data: {
+        'page_number': transaction.pageNumber,
+        'target_type': 'transaction_row',
+        'target_ref': transaction.sourceCellIds,
+        if (note != null && note.isNotEmpty) 'note': note,
+      },
+    );
+  }
+
   void reset() => state = const WorkflowState();
 }
 

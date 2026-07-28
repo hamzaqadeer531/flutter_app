@@ -171,6 +171,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           2: FixedColumnWidth(120),
           3: FixedColumnWidth(120),
           4: FixedColumnWidth(120),
+          5: FixedColumnWidth(40),
         },
         border: TableBorder(horizontalInside: BorderSide(color: AppColors.border)),
         defaultVerticalAlignment: TableCellVerticalAlignment.middle,
@@ -183,6 +184,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
               _headerCell('Debit'),
               _headerCell('Credit'),
               _headerCell('Balance'),
+              _headerCell(''),
             ],
           ),
           for (final t in transactions)
@@ -193,11 +195,65 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 _editableCell(t, 'debit', _formatAmount(t.debit), color: AppColors.red),
                 _editableCell(t, 'credit', _formatAmount(t.credit), color: AppColors.green),
                 _editableCell(t, 'balance', _formatAmount(t.balance)),
+                _flagButton(t),
               ],
             ),
         ],
       ),
     );
+  }
+
+  Widget _flagButton(PipelineTransaction transaction) {
+    return PopupMenuButton<String>(
+      icon: Icon(Icons.flag_outlined, size: 16, color: AppColors.muted),
+      tooltip: 'Flag a problem with this row',
+      onSelected: (errorKind) => _promptForNoteAndFlag(transaction, errorKind),
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: 'ocr', child: Text('OCR misread this row', style: TextStyle(fontSize: 12))),
+        PopupMenuItem(value: 'parser', child: Text('Parser split/grouped this row wrong', style: TextStyle(fontSize: 12))),
+        PopupMenuItem(value: 'classification', child: Text('Category/name is wrong', style: TextStyle(fontSize: 12))),
+      ],
+    );
+  }
+
+  Future<void> _promptForNoteAndFlag(PipelineTransaction transaction, String errorKind) async {
+    final controller = TextEditingController();
+    final note = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Flag this row'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Optional note (what looks wrong?)'),
+          maxLines: 3,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Flag'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (note == null) return; // cancelled
+
+    try {
+      await ref.read(workflowControllerProvider.notifier).markTransactionError(
+            transaction: transaction,
+            errorKind: errorKind,
+            note: note.isEmpty ? null : note,
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Flagged for review.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not flag this row: $error');
+    }
   }
 
   Widget _headerCell(String text) => Padding(
