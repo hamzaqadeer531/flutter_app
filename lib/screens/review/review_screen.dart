@@ -43,11 +43,14 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   final Map<String, _CellStatus> _cellStatus = {};
   bool _verifying = false;
 
-  /// Keyed by rowKey -- bulk-approve/bulk-reject (POST /review/{id}/
-  /// transaction/bulk-approve|bulk-reject) is gated server-side to
-  /// reviewer/admin roles, so the selection UI is only shown to them.
+  /// Keyed by rowKey. Selection is shared by two different actions with
+  /// different backend gates: bulk-approve/bulk-reject (reviewer/admin
+  /// only) and merge-rows (any authenticated user, get_current_user with
+  /// no require_role) -- so the checkbox column itself is always shown,
+  /// but which action buttons appear depends on role.
   final Set<String> _selectedRowKeys = {};
   bool _bulkActing = false;
+  bool _merging = false;
 
   @override
   Widget build(BuildContext context) {
@@ -130,24 +133,32 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                             style: TextStyle(fontSize: 12, color: AppColors.muted)),
                       ],
                     ),
-                    if (canBulkAct && _selectedRowKeys.isNotEmpty) ...[
+                    if (_selectedRowKeys.isNotEmpty) ...[
                       const SizedBox(height: 10),
                       Row(
                         children: [
                           Text('${_selectedRowKeys.length} selected',
                               style: TextStyle(fontSize: 12, color: AppColors.muted)),
                           const SizedBox(width: 10),
-                          OutlinedButton(
-                            onPressed: _bulkActing ? null : () => _bulkApprove(txns),
-                            child: const Text('Approve Selected', style: TextStyle(fontSize: 12)),
-                          ),
-                          const SizedBox(width: 8),
-                          OutlinedButton(
-                            onPressed: _bulkActing ? null : () => _bulkReject(txns),
-                            style: OutlinedButton.styleFrom(foregroundColor: AppColors.red),
-                            child: const Text('Reject Selected', style: TextStyle(fontSize: 12)),
-                          ),
-                          if (_bulkActing) ...[
+                          if (canBulkAct) ...[
+                            OutlinedButton(
+                              onPressed: _bulkActing ? null : () => _bulkApprove(txns),
+                              child: const Text('Approve Selected', style: TextStyle(fontSize: 12)),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton(
+                              onPressed: _bulkActing ? null : () => _bulkReject(txns),
+                              style: OutlinedButton.styleFrom(foregroundColor: AppColors.red),
+                              child: const Text('Reject Selected', style: TextStyle(fontSize: 12)),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          if (_selectedRowKeys.length >= 2)
+                            OutlinedButton(
+                              onPressed: _merging ? null : () => _mergeSelected(txns),
+                              child: const Text('Merge Selected Rows', style: TextStyle(fontSize: 12)),
+                            ),
+                          if (_bulkActing || _merging) ...[
                             const SizedBox(width: 10),
                             const SizedBox(
                               width: 14,
@@ -165,7 +176,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                               child: Text('No transactions match this filter.',
                                   style: TextStyle(color: AppColors.muted)),
                             )
-                          : _buildTable(txns, canBulkAct),
+                          : _buildTable(txns),
                     ),
                   ],
                 ),
@@ -221,19 +232,19 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
-  Widget _buildTable(List<PipelineTransaction> transactions, bool canBulkAct) {
-    final allSelected = canBulkAct && transactions.isNotEmpty &&
-        transactions.every((t) => _selectedRowKeys.contains(t.rowKey));
+  Widget _buildTable(List<PipelineTransaction> transactions) {
+    final allSelected =
+        transactions.isNotEmpty && transactions.every((t) => _selectedRowKeys.contains(t.rowKey));
     return SingleChildScrollView(
       child: Table(
-        columnWidths: {
-          if (canBulkAct) 0: const FixedColumnWidth(32),
-          (canBulkAct ? 1 : 0): const FixedColumnWidth(110),
-          (canBulkAct ? 2 : 1): const FlexColumnWidth(),
-          (canBulkAct ? 3 : 2): const FixedColumnWidth(120),
-          (canBulkAct ? 4 : 3): const FixedColumnWidth(120),
-          (canBulkAct ? 5 : 4): const FixedColumnWidth(120),
-          (canBulkAct ? 6 : 5): const FixedColumnWidth(64),
+        columnWidths: const {
+          0: FixedColumnWidth(32),
+          1: FixedColumnWidth(110),
+          2: FlexColumnWidth(),
+          3: FixedColumnWidth(120),
+          4: FixedColumnWidth(120),
+          5: FixedColumnWidth(120),
+          6: FixedColumnWidth(84),
         },
         border: TableBorder(horizontalInside: BorderSide(color: AppColors.border)),
         defaultVerticalAlignment: TableCellVerticalAlignment.middle,
@@ -241,18 +252,17 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           TableRow(
             decoration: const BoxDecoration(color: AppColors.navy),
             children: [
-              if (canBulkAct)
-                Checkbox(
-                  value: allSelected,
-                  fillColor: WidgetStateProperty.all(Colors.white),
-                  onChanged: (checked) => setState(() {
-                    if (checked ?? false) {
-                      _selectedRowKeys.addAll(transactions.map((t) => t.rowKey));
-                    } else {
-                      _selectedRowKeys.removeAll(transactions.map((t) => t.rowKey));
-                    }
-                  }),
-                ),
+              Checkbox(
+                value: allSelected,
+                fillColor: WidgetStateProperty.all(Colors.white),
+                onChanged: (checked) => setState(() {
+                  if (checked ?? false) {
+                    _selectedRowKeys.addAll(transactions.map((t) => t.rowKey));
+                  } else {
+                    _selectedRowKeys.removeAll(transactions.map((t) => t.rowKey));
+                  }
+                }),
+              ),
               _headerCell('Date'),
               _headerCell('Description'),
               _headerCell('Debit'),
@@ -264,17 +274,16 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           for (final t in transactions)
             TableRow(
               children: [
-                if (canBulkAct)
-                  Checkbox(
-                    value: _selectedRowKeys.contains(t.rowKey),
-                    onChanged: (checked) => setState(() {
-                      if (checked ?? false) {
-                        _selectedRowKeys.add(t.rowKey);
-                      } else {
-                        _selectedRowKeys.remove(t.rowKey);
-                      }
-                    }),
-                  ),
+                Checkbox(
+                  value: _selectedRowKeys.contains(t.rowKey),
+                  onChanged: (checked) => setState(() {
+                    if (checked ?? false) {
+                      _selectedRowKeys.add(t.rowKey);
+                    } else {
+                      _selectedRowKeys.remove(t.rowKey);
+                    }
+                  }),
+                ),
                 _editableCell(t, 'date_iso', t.dateIso ?? ''),
                 _editableCell(t, 'description', t.description, alignLeft: true),
                 _editableCell(t, 'debit', _formatAmount(t.debit), color: AppColors.red),
@@ -282,7 +291,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 _editableCell(t, 'balance', _formatAmount(t.balance)),
                 Row(
                   mainAxisSize: MainAxisSize.min,
-                  children: [_flagButton(t), _sourceButton(t)],
+                  children: [_flagButton(t), _sourceButton(t), _layoutToolsButton(t)],
                 ),
               ],
             ),
@@ -409,6 +418,25 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     }
   }
 
+  Future<void> _mergeSelected(List<PipelineTransaction> visibleTransactions) async {
+    final selected = visibleTransactions.where((t) => _selectedRowKeys.contains(t.rowKey)).toList();
+    if (selected.length < 2) return;
+    setState(() => _merging = true);
+    try {
+      await ref.read(workflowControllerProvider.notifier).mergeRows(selected);
+      if (!mounted) return;
+      setState(() => _selectedRowKeys.clear());
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${selected.length} row(s) merged — takes effect on next reprocess.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not merge selection: $error');
+    } finally {
+      if (mounted) setState(() => _merging = false);
+    }
+  }
+
   Widget _sourceButton(PipelineTransaction transaction) {
     return IconButton(
       icon: Icon(Icons.travel_explore_outlined, size: 16, color: AppColors.muted),
@@ -428,6 +456,236 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
         );
       },
     );
+  }
+
+  Widget _layoutToolsButton(PipelineTransaction transaction) {
+    return PopupMenuButton<String>(
+      icon: Icon(Icons.grid_view_outlined, size: 16, color: AppColors.muted),
+      tooltip: 'Split this row, merge cells, or split a cell',
+      padding: EdgeInsets.zero,
+      onSelected: (action) {
+        switch (action) {
+          case 'split_row':
+            _splitRowDialog(transaction);
+          case 'merge_cells':
+            _mergeCellsDialog(transaction);
+          case 'split_cell':
+            _splitCellDialog(transaction);
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: 'split_row', child: Text('Split this row...', style: TextStyle(fontSize: 12))),
+        PopupMenuItem(value: 'merge_cells', child: Text('Merge cells in this row...', style: TextStyle(fontSize: 12))),
+        PopupMenuItem(value: 'split_cell', child: Text('Split a cell...', style: TextStyle(fontSize: 12))),
+      ],
+    );
+  }
+
+  /// review.py's split-rows takes ONE row_ref (a transaction's
+  /// sourceCellIds) and a set of resulting_refs -- how to redistribute
+  /// those same cell ids into 2+ new rows. Cell ids are opaque strings
+  /// with no associated display text in this model, so the UI is a
+  /// plain "assign a group number to each cell id" list rather than a
+  /// rendered grid.
+  Future<void> _splitRowDialog(PipelineTransaction transaction) async {
+    final cellIds = transaction.sourceCellIds;
+    if (cellIds.isEmpty) {
+      _showError('This row has no cell references to split.');
+      return;
+    }
+    final groupControllers = {for (final id in cellIds) id: TextEditingController(text: '1')};
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Split this row'),
+        content: SizedBox(
+          width: 360,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Give each cell a group number — cells sharing a number become one resulting row.',
+                  style: TextStyle(fontSize: 12, color: AppColors.muted),
+                ),
+                const SizedBox(height: 10),
+                for (final id in cellIds)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(id, style: const TextStyle(fontSize: 11.5), overflow: TextOverflow.ellipsis),
+                        ),
+                        SizedBox(
+                          width: 60,
+                          child: TextField(
+                            controller: groupControllers[id],
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(isDense: true, hintText: 'Group'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Split')),
+        ],
+      ),
+    );
+
+    final groups = <String, List<String>>{};
+    for (final id in cellIds) {
+      final group = groupControllers[id]!.text.trim().isEmpty ? '1' : groupControllers[id]!.text.trim();
+      groups.putIfAbsent(group, () => []).add(id);
+    }
+    for (final c in groupControllers.values) {
+      c.dispose();
+    }
+    if (confirmed != true) return;
+
+    if (groups.length < 2) {
+      _showError('Enter at least two different group numbers to split this row.');
+      return;
+    }
+    try {
+      await ref.read(workflowControllerProvider.notifier).splitRows(transaction, groups.values.toList());
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Row split into ${groups.length} rows — takes effect on next reprocess.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not split row: $error');
+    }
+  }
+
+  Future<void> _mergeCellsDialog(PipelineTransaction transaction) async {
+    final cellIds = transaction.sourceCellIds;
+    if (cellIds.length < 2) {
+      _showError('This row does not have enough cell references to merge.');
+      return;
+    }
+    final selected = <String>{};
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Merge cells in this row'),
+          content: SizedBox(
+            width: 360,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final id in cellIds)
+                    CheckboxListTile(
+                      dense: true,
+                      value: selected.contains(id),
+                      title: Text(id, style: const TextStyle(fontSize: 11.5)),
+                      onChanged: (checked) => setDialogState(() {
+                        if (checked ?? false) {
+                          selected.add(id);
+                        } else {
+                          selected.remove(id);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Merge')),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true || selected.length < 2) return;
+
+    try {
+      await ref.read(workflowControllerProvider.notifier).mergeCells(transaction, selected.toList());
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cells merged — takes effect on next reprocess.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not merge cells: $error');
+    }
+  }
+
+  Future<void> _splitCellDialog(PipelineTransaction transaction) async {
+    final cellIds = transaction.sourceCellIds;
+    if (cellIds.isEmpty) {
+      _showError('This row has no cell references to split.');
+      return;
+    }
+    String selectedCellId = cellIds.first;
+    final textController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Split a cell'),
+          content: SizedBox(
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                DropdownButton<String>(
+                  isExpanded: true,
+                  value: selectedCellId,
+                  items: [
+                    for (final id in cellIds)
+                      DropdownMenuItem(
+                        value: id,
+                        child: Text(id, style: const TextStyle(fontSize: 11.5), overflow: TextOverflow.ellipsis),
+                      ),
+                  ],
+                  onChanged: (v) => setDialogState(() => selectedCellId = v ?? selectedCellId),
+                ),
+                const SizedBox(height: 10),
+                Text('One resulting piece of text per line:', style: TextStyle(fontSize: 12, color: AppColors.muted)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: textController,
+                  maxLines: 4,
+                  decoration: const InputDecoration(hintText: 'Text piece 1\nText piece 2'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Split')),
+          ],
+        ),
+      ),
+    );
+    final resultingTexts = textController.text.split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    textController.dispose();
+    if (confirmed != true || resultingTexts.length < 2) return;
+
+    try {
+      await ref.read(workflowControllerProvider.notifier).splitCells(transaction, selectedCellId, resultingTexts);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cell split — takes effect on next reprocess.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not split cell: $error');
+    }
   }
 
   Widget _headerCell(String text) => Padding(

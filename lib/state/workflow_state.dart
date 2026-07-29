@@ -315,6 +315,84 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     }
   }
 
+  /// Merges several transaction rows into one -- POST /review/{id}/
+  /// merge-rows. Unlike bulk-approve/reject, merge/split-rows/cells have
+  /// no role gate on the backend (get_current_user, not require_role),
+  /// so this is reachable by any authenticated user, not just reviewer/
+  /// admin. Each transaction's sourceCellIds IS the row_ref the backend
+  /// expects, since that's exactly the cell-id list a parsed row was
+  /// built from. Records an annotation only -- like markTransactionError,
+  /// it doesn't attempt to locally re-derive the merged row's fields,
+  /// since that requires re-running the parser; the merge takes effect
+  /// on the next reprocess.
+  Future<void> mergeRows(List<PipelineTransaction> transactions) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to merge rows on.');
+    }
+    if (transactions.length < 2) {
+      throw ArgumentError('Select at least two rows to merge.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    for (final entry in _groupByPage(transactions).entries) {
+      if (entry.value.length < 2) continue; // nothing to merge on this page alone
+      await dio.post(
+        '/review/$documentId/merge-rows',
+        data: {
+          'page_number': entry.key,
+          'row_refs': entry.value.map((t) => t.sourceCellIds).toList(),
+        },
+      );
+    }
+  }
+
+  /// Splits one transaction row's cells into multiple resulting rows --
+  /// POST /review/{id}/split-rows. resultingRefs is the caller-supplied
+  /// grouping of transaction.sourceCellIds into 2+ new row_refs.
+  Future<void> splitRows(PipelineTransaction transaction, List<List<String>> resultingRefs) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to split a row on.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post(
+      '/review/$documentId/split-rows',
+      data: {
+        'page_number': transaction.pageNumber,
+        'row_ref': transaction.sourceCellIds,
+        'resulting_refs': resultingRefs,
+      },
+    );
+  }
+
+  /// Merges several individual cells within a row into one -- POST
+  /// /review/{id}/merge-cells.
+  Future<void> mergeCells(PipelineTransaction transaction, List<String> cellRefs) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to merge cells on.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post(
+      '/review/$documentId/merge-cells',
+      data: {'page_number': transaction.pageNumber, 'cell_refs': cellRefs},
+    );
+  }
+
+  /// Splits one cell's text into several resulting cells -- POST
+  /// /review/{id}/split-cells.
+  Future<void> splitCells(PipelineTransaction transaction, String cellRef, List<String> resultingTexts) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to split a cell on.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post(
+      '/review/$documentId/split-cells',
+      data: {'page_number': transaction.pageNumber, 'cell_ref': cellRef, 'resulting_texts': resultingTexts},
+    );
+  }
+
   /// Marks the document verified -- POST /review/{id}/verify -- which
   /// kicks off backend template learning as a background job. Requires
   /// documentTypeId, which only became reliably non-null once the backend
