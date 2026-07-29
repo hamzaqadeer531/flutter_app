@@ -14,13 +14,8 @@ import '../../widgets/app_shell.dart';
 
 /// Migration of the HTML source's Templates Library modal, wired to the
 /// real Template Library API (Phase 5 Part D) instead of localStorage.
-///
-/// Honest gap: the backend has get/rename/clone/activate/deactivate/
-/// archive/delete/export/import/rollback for a template BY ID, but no
-/// "list all templates" endpoint yet — so this is a lookup-by-ID
-/// workspace rather than a browsable table. Adding a list endpoint is a
-/// small, backward-compatible follow-up, not done here to avoid
-/// expanding backend scope without a specific ask.
+/// Now browsable via GET /templates -- previously templates could only
+/// be looked up by an ID a caller already had memorized.
 class TemplateManagerScreen extends ConsumerStatefulWidget {
   const TemplateManagerScreen({super.key});
 
@@ -35,10 +30,42 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
   bool _loading = false;
   List<dynamic>? _lineage;
 
+  List<dynamic> _templates = [];
+  bool _loadingList = false;
+  bool _includeArchived = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTemplates();
+  }
+
   @override
   void dispose() {
     _idController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadTemplates() async {
+    setState(() => _loadingList = true);
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/templates', queryParameters: {'include_archived': _includeArchived});
+      setState(() => _templates = response.data as List<dynamic>);
+    } catch (error) {
+      setState(() => _error = 'Could not load templates: $error');
+    } finally {
+      setState(() => _loadingList = false);
+    }
+  }
+
+  void _selectFromList(Map<String, dynamic> template) {
+    setState(() {
+      _template = template;
+      _idController.text = template['id'].toString();
+      _lineage = null;
+      _error = null;
+    });
   }
 
   Future<void> _lookup() async {
@@ -72,6 +99,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
       final dio = ref.read(apiClientProvider).dio;
       final response = await dio.post('/templates/$id/$path');
       setState(() => _template = response.data as Map<String, dynamic>);
+      await _loadTemplates();
     } catch (error) {
       setState(() => _error = 'Action failed: $error');
     }
@@ -101,6 +129,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
       final dio = ref.read(apiClientProvider).dio;
       final response = await dio.post('/templates/$id/rename', data: {'new_name': newName});
       setState(() => _template = response.data as Map<String, dynamic>);
+      await _loadTemplates();
     } catch (error) {
       setState(() => _error = 'Rename failed: $error');
     }
@@ -118,6 +147,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
       final dio = ref.read(apiClientProvider).dio;
       final response = await dio.post('/templates/$id/clone', data: {'new_name': newName});
       setState(() => _template = response.data as Map<String, dynamic>);
+      await _loadTemplates();
     } catch (error) {
       setState(() => _error = 'Clone failed: $error');
     }
@@ -156,6 +186,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
         _lineage = null;
         _error = null;
       });
+      await _loadTemplates();
     } catch (error) {
       setState(() => _error = 'Import failed: $error');
     }
@@ -184,6 +215,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
         _template = response.data as Map<String, dynamic>;
         _lineage = null;
       });
+      await _loadTemplates();
     } catch (error) {
       setState(() => _error = 'Rollback failed: $error');
     }
@@ -200,6 +232,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
         _lineage = null;
         _idController.clear();
       });
+      await _loadTemplates();
     } catch (error) {
       setState(() => _error = 'Delete failed: $error');
     }
@@ -220,13 +253,7 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
                   const AppCardHeader(
                     icon: '🧩',
                     title: 'Template Manager',
-                    subtitle: 'Look up a saved layout template by ID to inspect or manage it.',
-                  ),
-                  const AppAlert(
-                    kind: AppAlertKind.info,
-                    message:
-                        'The backend does not yet expose a "list all templates" endpoint — templates are looked up by '
-                        'the ID recorded when they were saved during Training Mode.',
+                    subtitle: 'Browse saved layout templates, or look one up directly by ID.',
                   ),
                   Row(
                     children: [
@@ -247,6 +274,71 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
                       padding: const EdgeInsets.only(top: 12),
                       child: AppAlert(kind: AppAlertKind.error, message: _error!),
                     ),
+                ],
+              ),
+            ),
+            AppCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('All Templates',
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.heading)),
+                      Row(
+                        children: [
+                          Checkbox(
+                            value: _includeArchived,
+                            onChanged: (checked) {
+                              setState(() => _includeArchived = checked ?? false);
+                              _loadTemplates();
+                            },
+                          ),
+                          Text('Show archived', style: TextStyle(fontSize: 12.5, color: AppColors.muted)),
+                          const SizedBox(width: 8),
+                          OutlinedButton(
+                            onPressed: _loadingList ? null : _loadTemplates,
+                            child: Text(_loadingList ? 'Loading…' : 'Reload'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (_templates.isEmpty)
+                    Text('No templates yet.', style: TextStyle(color: AppColors.muted))
+                  else
+                    for (final t in _templates)
+                      InkWell(
+                        onTap: () => _selectFromList(t as Map<String, dynamic>),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${t['name']} · v${t['version']}',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    color: _template != null && _template!['id'] == t['id']
+                                        ? AppColors.accent
+                                        : AppColors.text,
+                                    fontWeight:
+                                        _template != null && _template!['id'] == t['id'] ? FontWeight.w700 : FontWeight.normal,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                '${t['is_active'] == true ? 'Active' : 'Inactive'}'
+                                '${t['is_archived'] == true ? ' · Archived' : ''}',
+                                style: TextStyle(fontSize: 11.5, color: AppColors.muted),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                 ],
               ),
             ),
