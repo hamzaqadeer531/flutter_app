@@ -1,5 +1,6 @@
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -53,12 +54,28 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['pdf', 'xlsx', 'xls', 'csv', 'jpg', 'jpeg', 'png', 'webp'],
+      withData: true, // web has no real file path -- this is the only way to get the bytes there
     );
     if (result == null || result.files.isEmpty) return;
     final file = result.files.single;
+
+    // file_picker's PlatformFile.path GETTER THROWS on web (not just null)
+    // -- merely evaluating file.path there crashes immediately, so kIsWeb
+    // must gate which branch is taken, not a null-check on .path itself.
+    if (kIsWeb) {
+      if (file.bytes == null) return;
+      await ref.read(workflowControllerProvider.notifier).uploadAndProcess(
+            fileBytes: file.bytes,
+            filename: file.name,
+            bank: _selectedBank,
+            ocrEngine: _selectedEngine,
+          );
+      return;
+    }
+
     if (file.path == null) return;
     await ref.read(workflowControllerProvider.notifier).uploadAndProcess(
-          filePath: file.path!,
+          filePath: file.path,
           filename: file.name,
           bank: _selectedBank,
           ocrEngine: _selectedEngine,

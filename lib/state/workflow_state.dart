@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -68,18 +70,27 @@ class WorkflowController extends StateNotifier<WorkflowState> {
 
   final Ref _ref;
 
+  /// filePath is used on desktop/mobile; fileBytes is required on web,
+  /// where browsers never expose a real filesystem path for a picked file
+  /// (file_picker's PlatformFile.path is always null there) -- exactly one
+  /// of the two must be supplied.
   Future<void> uploadAndProcess({
-    required String filePath,
+    String? filePath,
+    Uint8List? fileBytes,
     required String filename,
     required String? bank,
     String? ocrEngine,
   }) async {
+    assert(filePath != null || fileBytes != null, 'Must supply either filePath or fileBytes.');
     final dio = _ref.read(apiClientProvider).dio;
     state = WorkflowState(stage: WorkflowStage.uploading, filename: filename, bank: bank, progressMessage: 'Uploading statement...');
 
     try {
+      final multipartFile = filePath != null
+          ? await MultipartFile.fromFile(filePath, filename: filename)
+          : MultipartFile.fromBytes(fileBytes!, filename: filename);
       final formData = FormData.fromMap({
-        'file': await MultipartFile.fromFile(filePath, filename: filename),
+        'file': multipartFile,
         if (bank != null) 'bank_hint': bank, // ignore: use_null_aware_elements
       });
       final uploadResponse = await dio.post('/documents/upload', data: formData);
@@ -93,7 +104,10 @@ class WorkflowController extends StateNotifier<WorkflowState> {
       );
       await _runOcrLayoutParse(dio, documentId, ocrEngine: ocrEngine, forceReprocess: false);
     } catch (error) {
-      state = state.copyWith(stage: WorkflowStage.failed, errorMessage: error.toString());
+      final message = error is DioException && error.response?.statusCode == 401
+          ? 'Your session just refreshed — please try uploading again.'
+          : error.toString();
+      state = state.copyWith(stage: WorkflowStage.failed, errorMessage: message);
     }
   }
 

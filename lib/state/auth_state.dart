@@ -64,6 +64,20 @@ class AuthController extends StateNotifier<AuthState> {
       final token = TokenResponse.fromJson(response.data as Map<String, dynamic>);
       await _persistAndActivate(token);
 
+      // FormData wraps file content in a single-use stream (MultipartFile)
+      // -- dio already consumed it sending the original (failed) request,
+      // so resending the same FormData object throws instead of actually
+      // retrying. That thrown error used to be caught below and treated
+      // as a refresh failure, force-signing the user out even though the
+      // refresh itself just succeeded -- surfaced as a raw DioException
+      // on the Upload screen after a token expired mid-session. The token
+      // is valid again now; just let the original 401 propagate so the
+      // caller's *next* attempt (e.g. re-clicking "Choose File(s)")
+      // succeeds normally, instead of forcing a sign-out.
+      if (error.requestOptions.data is FormData) {
+        return handler.next(error);
+      }
+
       final retryOptions = error.requestOptions;
       retryOptions.headers['Authorization'] = 'Bearer ${token.accessToken}';
       final retryResponse = await _apiClient.dio.fetch(retryOptions);

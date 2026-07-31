@@ -30,7 +30,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (authState.isLoading) return null;
       final loggingIn = state.matchedLocation == '/login';
       if (!authState.isAuthenticated && !loggingIn) return '/login';
-      if (authState.isAuthenticated && loggingIn) return '/dashboard';
+      // Upload is the actual start of the workflow -- dashboard is an
+      // analytics view a fresh session has nothing to show yet.
+      if (authState.isAuthenticated && loggingIn) return '/upload';
       return null;
     },
     routes: [
