@@ -8,14 +8,13 @@ import '../../widgets/app_card.dart';
 import '../../widgets/app_main.dart';
 import '../../widgets/app_shell.dart';
 
-/// Net-new screen — no HTML precedent. The backend has no
-/// organizations/users CRUD API (Phase 6 Part L added org SCOPING to
-/// existing resources, not an org-management surface), so this screen
-/// is deliberately scoped to what genuinely exists today: license
-/// issue/list/activate/validate/revoke by organization ID (Phase 7 Part
-/// J) and the audit trail lookup by document ID (Phase 6 Part K). Building a fabricated
-/// user/org management UI backed by nothing would be worse than being
-/// honest about the gap.
+/// Net-new screen — no HTML precedent. License issue/list/activate/
+/// validate/revoke by organization ID (Phase 7 Part J), the audit trail
+/// lookup by document ID (Phase 6 Part K), learned rule suggestions,
+/// and user account management -- admin-provisioned only, since there
+/// is no public self-registration route anywhere in this API (this app
+/// handles client financial data; accounts are created by an admin, not
+/// signed up for). There's still no full organizations-CRUD surface.
 class AdminScreen extends ConsumerStatefulWidget {
   const AdminScreen({super.key});
 
@@ -37,6 +36,7 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
   void initState() {
     super.initState();
     _loadSuggestions();
+    _loadUsers();
   }
 
   @override
@@ -47,7 +47,62 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
     _issueMaxDevicesController.dispose();
     _activationTokenController.dispose();
     _deviceIdController.dispose();
+    _newUserNameController.dispose();
+    _newUserEmailController.dispose();
     super.dispose();
+  }
+
+  List<dynamic> _users = [];
+  bool _loadingUsers = false;
+  final _newUserNameController = TextEditingController();
+  final _newUserEmailController = TextEditingController();
+  String _newUserRole = 'staff';
+  Map<String, dynamic>? _lastCreatedUser;
+
+  /// Admin-provisioned accounts -- there is no public self-registration
+  /// route anywhere in this API on purpose (this app handles client
+  /// financial data), so an admin creating each account here is the only
+  /// way anyone gets in besides this one.
+  Future<void> _loadUsers() async {
+    setState(() => _loadingUsers = true);
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/users');
+      setState(() => _users = response.data as List<dynamic>);
+    } catch (error) {
+      setState(() => _error = 'Could not load users: $error');
+    } finally {
+      setState(() => _loadingUsers = false);
+    }
+  }
+
+  Future<void> _createUser() async {
+    final name = _newUserNameController.text.trim();
+    final email = _newUserEmailController.text.trim();
+    if (name.isEmpty || email.isEmpty) return;
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.post('/users', data: {'name': name, 'email': email, 'role': _newUserRole});
+      setState(() {
+        _lastCreatedUser = response.data as Map<String, dynamic>;
+        _newUserNameController.clear();
+        _newUserEmailController.clear();
+        _error = null;
+      });
+      await _loadUsers();
+    } catch (error) {
+      setState(() => _error = 'Create user failed: $error');
+    }
+  }
+
+  Future<void> _setUserActive(String userId, bool active) async {
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      await dio.post('/users/$userId/${active ? 'activate' : 'deactivate'}');
+      await _loadUsers();
+    } catch (error) {
+      setState(() => _error = '${active ? 'Activate' : 'Deactivate'} failed: $error');
+    }
   }
 
   /// GET /review/suggestions/pending -- learned rule suggestions
@@ -232,13 +287,14 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
                   const AppCardHeader(
                     icon: '🛡️',
                     title: 'Administration',
-                    subtitle: 'License management, audit trail lookup, and learned rule suggestions.',
+                    subtitle: 'User accounts, license management, audit trail lookup, and learned rule suggestions.',
                   ),
                   Row(
                     children: [
-                      _tabButton('Licenses', 0),
-                      _tabButton('Audit Trail', 1),
-                      _tabButton('Rule Suggestions', 2),
+                      _tabButton('Users', 0),
+                      _tabButton('Licenses', 1),
+                      _tabButton('Audit Trail', 2),
+                      _tabButton('Rule Suggestions', 3),
                     ],
                   ),
                   if (_error != null)
@@ -249,9 +305,10 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
                 ],
               ),
             ),
-            if (_tab == 0) _licensesTab(),
-            if (_tab == 1) _auditTab(),
-            if (_tab == 2) _suggestionsTab(),
+            if (_tab == 0) _usersTab(),
+            if (_tab == 1) _licensesTab(),
+            if (_tab == 2) _auditTab(),
+            if (_tab == 3) _suggestionsTab(),
           ],
         ),
       ),
@@ -269,6 +326,102 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
           foregroundColor: active ? AppColors.accent : AppColors.text,
         ),
         child: Text(label, style: const TextStyle(fontSize: 12.5)),
+      ),
+    );
+  }
+
+  Widget _usersTab() {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('Add a user',
+              style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+          const SizedBox(height: 4),
+          Text('No public sign-up exists — this is the only way anyone gets an account.',
+              style: TextStyle(fontSize: 11.5, color: AppColors.muted)),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              SizedBox(
+                width: 200,
+                child: TextField(controller: _newUserNameController, decoration: const InputDecoration(hintText: 'Name')),
+              ),
+              SizedBox(
+                width: 240,
+                child: TextField(
+                  controller: _newUserEmailController,
+                  decoration: const InputDecoration(hintText: 'Email'),
+                ),
+              ),
+              DropdownButton<String>(
+                value: _newUserRole,
+                items: const [
+                  DropdownMenuItem(value: 'staff', child: Text('Staff', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 'reviewer', child: Text('Reviewer', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 'admin', child: Text('Admin', style: TextStyle(fontSize: 12))),
+                ],
+                onChanged: (v) => setState(() => _newUserRole = v ?? _newUserRole),
+              ),
+              ElevatedButton(onPressed: _createUser, child: const Text('Create')),
+            ],
+          ),
+          if (_lastCreatedUser != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: AppAlert(
+                kind: AppAlertKind.info,
+                message: 'Created ${_lastCreatedUser!['email']} — temporary password '
+                    '(save this now, it is not shown again): ${_lastCreatedUser!['temporary_password']}',
+              ),
+            ),
+          const SizedBox(height: 20),
+          const Divider(),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('All Users', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: AppColors.heading)),
+              OutlinedButton(
+                onPressed: _loadingUsers ? null : _loadUsers,
+                child: Text(_loadingUsers ? 'Loading…' : 'Reload'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (_users.isEmpty)
+            Text('No users yet.', style: TextStyle(color: AppColors.muted))
+          else
+            for (final u in _users)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${u['name']} · ${u['email']} · ${u['role']}'
+                        '${u['is_active'] == true ? '' : ' · Deactivated'}',
+                        style: const TextStyle(fontSize: 12.5, color: AppColors.text),
+                      ),
+                    ),
+                    if (u['is_active'] == true)
+                      TextButton(
+                        onPressed: () => _setUserActive(u['id'].toString(), false),
+                        child: const Text('Deactivate', style: TextStyle(color: AppColors.red)),
+                      )
+                    else
+                      TextButton(
+                        onPressed: () => _setUserActive(u['id'].toString(), true),
+                        child: const Text('Activate', style: TextStyle(color: AppColors.green)),
+                      ),
+                  ],
+                ),
+              ),
+        ],
       ),
     );
   }
