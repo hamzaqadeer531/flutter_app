@@ -430,6 +430,43 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     await _pollOcrJob(dio, jobId);
   }
 
+  /// Explicit, opt-in NER-assisted second name-extraction pass -- POST
+  /// /review/{id}/enhance-names -- for transactions the always-on regex
+  /// cascade found nothing for (services/review_service.py::
+  /// enhance_names_with_ner). Runs as a background job on the server (a
+  /// CPU model load + inference pass isn't fast enough to block the
+  /// request), so this reuses _pollOcrJob exactly like verifyDocument
+  /// does. Once the job succeeds, re-fetches GET /transactions/{id}/
+  /// reviewed and merges each row's extracted_name/name_source in by
+  /// sourceCellIds -- merged, not replaced wholesale, so any locally-
+  /// tracked date/description/debit/credit/balance edits from
+  /// editTransactionField survive.
+  Future<void> enhanceNames() async {
+    final documentId = state.documentId;
+    final statement = state.statement;
+    if (documentId == null || statement == null) {
+      throw StateError('No active document to enhance names on.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    final response = await dio.post('/review/$documentId/enhance-names');
+    final jobId = response.data['job_id'] as String;
+    await _pollOcrJob(dio, jobId);
+
+    final reviewedResponse = await dio.get('/transactions/$documentId/reviewed');
+    final reviewedRows = (reviewedResponse.data as List<dynamic>).cast<Map<String, dynamic>>();
+    final rowByKey = {
+      for (final row in reviewedRows)
+        (row['source_cell_ids'] as List<dynamic>? ?? []).cast<String>().join('|'): row,
+    };
+
+    final updatedTransactions = statement.transactions.map((t) {
+      final row = rowByKey[t.rowKey];
+      if (row == null) return t;
+      return t.copyWith(extractedName: row['extracted_name'] as String?, nameSource: row['name_source'] as String?);
+    }).toList();
+    state = state.copyWith(statement: statement.copyWith(transactions: updatedTransactions));
+  }
+
   void reset() => state = const WorkflowState();
 }
 

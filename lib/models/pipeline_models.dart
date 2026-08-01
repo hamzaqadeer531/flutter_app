@@ -14,6 +14,8 @@ class PipelineTransaction {
     this.referenceNumber,
     this.chequeNumber,
     this.transactionCode,
+    this.extractedName,
+    this.nameSource,
   });
 
   String? dateIso;
@@ -23,6 +25,15 @@ class PipelineTransaction {
   double? balance;
   final double confidence;
   final int pageNumber;
+
+  /// Extracted counterparty name (regex cascade, or the opt-in NER
+  /// enhancement pass -- see nameSource) and, when nameSource is 'ner',
+  /// which pass produced it. Both null until either GET /transactions/
+  /// {id}/reviewed populates them (this model's default source is the
+  /// raw parser output, which has neither) or WorkflowController.
+  /// enhanceNames() merges a fresh reviewed-transactions fetch in.
+  String? extractedName;
+  String? nameSource;
 
   /// The layout cell ids this row was built from -- the SAME identifier
   /// TransactionWire.source_cell_ids documents as the transaction_ref to
@@ -50,6 +61,8 @@ class PipelineTransaction {
       referenceNumber: json['reference_number'] as String?,
       chequeNumber: json['cheque_number'] as String?,
       transactionCode: json['transaction_code'] as String?,
+      extractedName: json['extracted_name'] as String?,
+      nameSource: json['name_source'] as String?,
     );
   }
 
@@ -64,6 +77,8 @@ class PipelineTransaction {
     double? debit,
     double? credit,
     double? balance,
+    String? extractedName,
+    String? nameSource,
   }) {
     return PipelineTransaction(
       dateIso: dateIso ?? this.dateIso,
@@ -77,6 +92,8 @@ class PipelineTransaction {
       referenceNumber: referenceNumber,
       chequeNumber: chequeNumber,
       transactionCode: transactionCode,
+      extractedName: extractedName ?? this.extractedName,
+      nameSource: nameSource ?? this.nameSource,
     );
   }
 }

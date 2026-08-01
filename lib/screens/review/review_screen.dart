@@ -42,6 +42,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   /// "just saved" checkmark the instant it appears.
   final Map<String, _CellStatus> _cellStatus = {};
   bool _verifying = false;
+  bool _enhancingNames = false;
 
   /// Keyed by rowKey. Selection is shared by two different actions with
   /// different backend gates: bulk-approve/bulk-reject (reviewer/admin
@@ -192,6 +193,21 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 Row(
                   children: [
                     Tooltip(
+                      message: 'Runs an AI model over transactions the automatic name extraction '
+                          'found nothing for, and fills in a counterparty name where confident.',
+                      child: OutlinedButton(
+                        onPressed: _enhancingNames ? null : _enhanceNames,
+                        child: _enhancingNames
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('🧠 Enhance Names (AI)'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Tooltip(
                       message: workflow.documentTypeId == null
                           ? 'This document could not be auto-classified, so it can\'t be verified.'
                           : 'Marks this document verified and trains a template from it.',
@@ -285,7 +301,21 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                   }),
                 ),
                 _editableCell(t, 'date_iso', t.dateIso ?? ''),
-                _editableCell(t, 'description', t.description, alignLeft: true),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _editableCell(t, 'description', t.description, alignLeft: true),
+                    if (t.extractedName != null && t.extractedName!.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4, top: 2),
+                        child: Text(
+                          t.nameSource == 'ner' ? '🧠 ${t.extractedName}' : t.extractedName!,
+                          style: TextStyle(fontSize: 10, color: AppColors.muted, fontStyle: FontStyle.italic),
+                        ),
+                      ),
+                  ],
+                ),
                 _editableCell(t, 'debit', _formatAmount(t.debit), color: AppColors.red),
                 _editableCell(t, 'credit', _formatAmount(t.credit), color: AppColors.green),
                 _editableCell(t, 'balance', _formatAmount(t.balance)),
@@ -743,6 +773,22 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       if (!mounted) return;
       setState(() => _cellStatus[statusKey] = _CellStatus.error);
       _showError('Could not save: $error');
+    }
+  }
+
+  Future<void> _enhanceNames() async {
+    setState(() => _enhancingNames = true);
+    try {
+      await ref.read(workflowControllerProvider.notifier).enhanceNames();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Name enhancement complete — check the Description column for newly filled names.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Name enhancement failed: $error');
+    } finally {
+      if (mounted) setState(() => _enhancingNames = false);
     }
   }
 
