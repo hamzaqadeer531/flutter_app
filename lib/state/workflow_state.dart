@@ -528,6 +528,80 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     await _refreshReviewedTransactions();
   }
 
+  /// AI Validation (Gemini Stage 1) -- POST /review/{id}/validate. Sends
+  /// the ORIGINAL uploaded file to Gemini for an independent cross-check
+  /// against the local parse; read-only and stateless on the server, so
+  /// this can be called again freely (e.g. after applying a correction,
+  /// to see the list shrink). Returns the raw response map (overall_
+  /// confidence/summary/warnings/corrections) for the Review screen to
+  /// render directly -- no dedicated model, same as
+  /// fetchMissingTransactionCandidates().
+  Future<Map<String, dynamic>> validateWithAI() async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to validate.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    final response = await dio.post('/review/$documentId/validate');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// AI Auto-Repair (Gemini Stage 3) -- POST /review/{id}/transaction/
+  /// apply-ai-correction. Not a new mutation path server-side (see
+  /// ReviewService.apply_ai_correction) -- refreshes the statement
+  /// wholesale afterward, same reasoning as insertTransaction: a "type"
+  /// correction touches two fields (debit AND credit) at once, which a
+  /// single-row merge-by-key wouldn't safely express.
+  Future<void> applyAICorrection({
+    required List<String> transactionRef,
+    required String kind,
+    required Object suggestedValue,
+  }) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to apply a correction to.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post('/review/$documentId/transaction/apply-ai-correction', data: {
+      'transaction_ref': transactionRef,
+      'kind': kind,
+      'suggested_value': suggestedValue,
+    });
+    await _refreshReviewedTransactions();
+  }
+
+  /// AI Recovery (Gemini Stage 2) -- POST /review/{id}/recover. A full,
+  /// fresh re-extraction of the ORIGINAL file, for when the local parse
+  /// looks bad enough a reviewer wants an independent second attempt.
+  /// Staged: returns candidate transactions but changes nothing --
+  /// acceptAIRecovery below is the only thing that actually replaces
+  /// the document's data, and only once a reviewer explicitly confirms.
+  Future<Map<String, dynamic>> recoverWithAI() async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to run AI Recovery on.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    final response = await dio.post('/review/$documentId/recover');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Replaces the ENTIRE transaction list with the accepted recovery
+  /// candidates -- POST /review/{id}/recover/accept -- then refreshes
+  /// wholesale from GET /transactions/{id}/reviewed, same as
+  /// insertTransaction/applyAICorrection. transactions is the exact
+  /// list recoverWithAI() returned (a reviewer may have removed
+  /// obviously-wrong rows from it first).
+  Future<void> acceptAIRecovery(List<Map<String, dynamic>> transactions) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to accept AI Recovery for.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post('/review/$documentId/recover/accept', data: {'transactions': transactions});
+    await _refreshReviewedTransactions();
+  }
+
   Future<void> _refreshReviewedTransactions() async {
     final documentId = state.documentId;
     final statement = state.statement;

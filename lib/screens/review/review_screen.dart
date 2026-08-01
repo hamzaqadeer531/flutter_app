@@ -44,6 +44,8 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   bool _verifying = false;
   bool _enhancingNames = false;
   bool _checkingMissing = false;
+  bool _validatingWithAI = false;
+  bool _recoveringWithAI = false;
 
   /// Keyed by rowKey. Selection is shared by two different actions with
   /// different backend gates: bulk-approve/bulk-reject (reviewer/admin
@@ -205,6 +207,37 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                                 child: CircularProgressIndicator(strokeWidth: 2),
                               )
                             : const Text('🧠 Enhance Names (AI)'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Tooltip(
+                      message: 'Sends the original file to Gemini for an independent cross-check '
+                          'against the local parse -- flags rows whose debit/credit or amount look wrong.',
+                      child: OutlinedButton(
+                        onPressed: _validatingWithAI ? null : _runAIValidation,
+                        child: _validatingWithAI
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('🔍 AI Validate'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Tooltip(
+                      message: 'Fallback for a bad parse: asks Gemini to re-extract every transaction '
+                          'from scratch. Staged -- nothing changes until you review and accept it, '
+                          'and accepting REPLACES the whole transaction list.',
+                      child: OutlinedButton(
+                        onPressed: _recoveringWithAI ? null : _runAIRecovery,
+                        child: _recoveringWithAI
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('🔮 AI Recovery'),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -835,6 +868,104 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     }
   }
 
+  Future<void> _runAIValidation() async {
+    setState(() => _validatingWithAI = true);
+    Map<String, dynamic> result;
+    try {
+      result = await ref.read(workflowControllerProvider.notifier).validateWithAI();
+    } catch (error) {
+      if (!mounted) return;
+      _showError('AI Validation failed: $error');
+      return;
+    } finally {
+      if (mounted) setState(() => _validatingWithAI = false);
+    }
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (context) => _AIValidationDialog(
+        result: result,
+        onApply: (correction) async {
+          try {
+            await ref.read(workflowControllerProvider.notifier).applyAICorrection(
+                  transactionRef: (correction['transaction_ref'] as List).cast<String>(),
+                  kind: correction['kind'] as String,
+                  suggestedValue: correction['suggested_value'] as Object,
+                );
+            return true;
+          } catch (error) {
+            if (!mounted) return false;
+            _showError('Could not apply correction: $error');
+            return false;
+          }
+        },
+      ),
+    );
+  }
+
+  Future<void> _runAIRecovery() async {
+    setState(() => _recoveringWithAI = true);
+    Map<String, dynamic> result;
+    try {
+      result = await ref.read(workflowControllerProvider.notifier).recoverWithAI();
+    } catch (error) {
+      if (!mounted) return;
+      _showError('AI Recovery failed: $error');
+      return;
+    } finally {
+      if (mounted) setState(() => _recoveringWithAI = false);
+    }
+    if (!mounted) return;
+
+    final transactions = (result['transactions'] as List).cast<Map<String, dynamic>>();
+    if (transactions.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Gemini did not recover any transactions from this file.')),
+      );
+      return;
+    }
+
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => _AIRecoveryDialog(result: result),
+    );
+    if (accepted != true) return;
+    if (!mounted) return;
+
+    final currentCount = ref.read(workflowControllerProvider).statement?.transactions.length ?? 0;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Replace all transactions?'),
+        content: Text(
+          'This replaces all $currentCount current transaction(s) with the ${transactions.length} '
+          'Gemini recovered. Any un-exported review corrections on the replaced rows will no longer apply. '
+          'This cannot be undone.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.red),
+            child: const Text('Replace'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await ref.read(workflowControllerProvider.notifier).acceptAIRecovery(transactions);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Replaced with ${transactions.length} recovered transaction(s).')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not accept AI Recovery: $error');
+    }
+  }
+
   Future<void> _checkMissingTransactions() async {
     setState(() => _checkingMissing = true);
     List<Map<String, dynamic>> candidates;
@@ -1385,6 +1516,229 @@ class _MissingTransactionsDialog extends StatelessWidget {
       actions: [
         TextButton(onPressed: onInsertManually, child: const Text('+ Insert Manually')),
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+      ],
+    );
+  }
+}
+
+/// Shows one AI Validation run's result (POST /review/{id}/validate) --
+/// overall confidence, summary, warnings, and every suggested
+/// correction with Apply/Dismiss. Applying calls back into
+/// _ReviewScreenState (onApply) to actually persist it (Gemini Stage
+/// 3/Auto-Repair); Dismiss is purely local, since nothing about a
+/// suggestion is ever saved server-side until Apply.
+class _AIValidationDialog extends StatefulWidget {
+  const _AIValidationDialog({required this.result, required this.onApply});
+
+  final Map<String, dynamic> result;
+  final Future<bool> Function(Map<String, dynamic> correction) onApply;
+
+  @override
+  State<_AIValidationDialog> createState() => _AIValidationDialogState();
+}
+
+class _AIValidationDialogState extends State<_AIValidationDialog> {
+  late List<Map<String, dynamic>> _corrections;
+  final Set<int> _applying = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _corrections = (widget.result['corrections'] as List? ?? []).cast<Map<String, dynamic>>();
+  }
+
+  Future<void> _apply(int index) async {
+    setState(() => _applying.add(index));
+    final applied = await widget.onApply(_corrections[index]);
+    if (!mounted) return;
+    setState(() {
+      _applying.remove(index);
+      if (applied) _corrections.removeAt(index);
+    });
+  }
+
+  void _dismiss(int index) => setState(() => _corrections.removeAt(index));
+
+  @override
+  Widget build(BuildContext context) {
+    final confidence = widget.result['overall_confidence'];
+    final summary = widget.result['summary'] as String? ?? '';
+    final warnings = (widget.result['warnings'] as List? ?? []).cast<String>();
+
+    return AlertDialog(
+      title: const Text('AI Validation'),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (confidence != null)
+                Text('Gemini confidence: $confidence%',
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              if (summary.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(summary, style: TextStyle(fontSize: 12, color: AppColors.muted)),
+              ],
+              if (warnings.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                const Text('Warnings', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.orange)),
+                for (final w in warnings)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text('• $w', style: TextStyle(fontSize: 11.5, color: AppColors.muted)),
+                  ),
+              ],
+              const SizedBox(height: 12),
+              if (_corrections.isEmpty)
+                Text('No corrections suggested.', style: TextStyle(fontSize: 12, color: AppColors.muted))
+              else
+                for (var i = 0; i < _corrections.length; i++) _correctionCard(i),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+      ],
+    );
+  }
+
+  Widget _correctionCard(int index) {
+    final c = _corrections[index];
+    final busy = _applying.contains(index);
+    final kind = c['kind'] as String;
+    final label = kind == 'type'
+        ? 'Change type: ${c['original_value']} → ${c['suggested_value']}'
+        : 'Change amount: ${c['original_value']} → ${c['suggested_value']}';
+    final evidence = c['evidence'] as String? ?? '';
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      color: AppColors.panel2,
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(child: Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))),
+                if (c['confidence'] != null)
+                  Text('${c['confidence']}%', style: TextStyle(fontSize: 11, color: AppColors.muted)),
+              ],
+            ),
+            if (evidence.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text('"$evidence"',
+                    style: TextStyle(fontSize: 11, color: AppColors.muted, fontStyle: FontStyle.italic)),
+              ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: busy ? null : () => _dismiss(index),
+                  child: const Text('Dismiss', style: TextStyle(fontSize: 12)),
+                ),
+                const SizedBox(width: 6),
+                OutlinedButton(
+                  onPressed: busy ? null : () => _apply(index),
+                  child: busy
+                      ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Apply', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Previews an AI Recovery run's staged candidates (POST /review/{id}/
+/// recover) -- summary, confidence, and every recovered row, read-only.
+/// Pops `true` if the reviewer wants to proceed (the caller then shows
+/// a separate, explicit "this replaces everything" confirmation before
+/// actually calling acceptAIRecovery), `false`/dismissed otherwise.
+/// Nothing here calls the backend -- accepting is entirely the caller's
+/// responsibility, so this dialog can't itself cause data loss.
+class _AIRecoveryDialog extends StatelessWidget {
+  const _AIRecoveryDialog({required this.result});
+
+  final Map<String, dynamic> result;
+
+  @override
+  Widget build(BuildContext context) {
+    final confidence = result['overall_confidence'];
+    final summary = result['summary'] as String? ?? '';
+    final transactions = (result['transactions'] as List).cast<Map<String, dynamic>>();
+
+    return AlertDialog(
+      title: const Text('AI Recovery -- staged results'),
+      content: SizedBox(
+        width: 480,
+        height: 420,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (confidence != null)
+              Text('Gemini confidence: $confidence%', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+            if (summary.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(summary, style: TextStyle(fontSize: 12, color: AppColors.muted)),
+            ],
+            const SizedBox(height: 10),
+            Text('${transactions.length} transaction(s) recovered:',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            Expanded(
+              child: ListView.builder(
+                itemCount: transactions.length,
+                itemBuilder: (context, index) {
+                  final t = transactions[index];
+                  final debit = t['debit'];
+                  final credit = t['credit'];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Row(
+                      children: [
+                        SizedBox(width: 80, child: Text(t['date_iso']?.toString() ?? '?', style: const TextStyle(fontSize: 11))),
+                        Expanded(
+                          child: Text(t['description']?.toString() ?? '',
+                              style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis),
+                        ),
+                        SizedBox(
+                          width: 70,
+                          child: Text(
+                            debit != null ? (debit as num).toStringAsFixed(2) : '',
+                            style: TextStyle(fontSize: 11, color: AppColors.red),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                        SizedBox(
+                          width: 70,
+                          child: Text(
+                            credit != null ? (credit as num).toStringAsFixed(2) : '',
+                            style: TextStyle(fontSize: 11, color: AppColors.green),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Reject')),
+        ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Review & Accept')),
       ],
     );
   }

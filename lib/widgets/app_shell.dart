@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../state/auth_state.dart';
+import '../state/chat_state.dart';
+import '../state/workflow_state.dart';
 import '../theme/app_colors.dart';
+import 'ai_assistant_panel.dart';
 
 /// The top navigation bar every authenticated screen sits under —
 /// pixel-matched to the HTML source's `.nav` bar (56px navy bar, bank
@@ -21,9 +24,32 @@ class AppShell extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final user = ref.watch(authControllerProvider).user;
+    final documentId = ref.watch(workflowControllerProvider.select((s) => s.documentId));
+
+    // A new document means any prior conversation was about a DIFFERENT
+    // statement -- resending that history as context for the new one
+    // would confuse the assistant, so drop it rather than carry it over
+    // silently.
+    ref.listen<String?>(workflowControllerProvider.select((s) => s.documentId), (previous, next) {
+      if (previous != null && previous != next) {
+        ref.read(chatControllerProvider.notifier).reset();
+      }
+    });
 
     return Scaffold(
       backgroundColor: AppColors.bodyBackground,
+      floatingActionButton: documentId == null
+          ? null
+          : FloatingActionButton(
+              tooltip: 'AI Assistant -- ask questions about this statement',
+              backgroundColor: AppColors.accent,
+              foregroundColor: AppColors.accentOn,
+              onPressed: () => showDialog(
+                context: context,
+                builder: (context) => AiAssistantPanel(documentId: documentId),
+              ),
+              child: const Text('🤖', style: TextStyle(fontSize: 22)),
+            ),
       body: Column(
         children: [
           Container(
