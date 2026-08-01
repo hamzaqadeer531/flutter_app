@@ -71,6 +71,16 @@ class PipelineTransaction {
   /// index, which shifts under filtering/search in the Review screen.
   String get rowKey => sourceCellIds.join('|');
 
+  /// True for a row a reviewer typed in by hand (WorkflowController.
+  /// insertTransaction) rather than one the parser produced -- backend_
+  /// python's ReviewService.insert_transaction mints a synthetic
+  /// "inserted-`<uuid>`" id as the row's one and only source_cell_ids
+  /// entry, since it has no real layout cells behind it. Used to hide
+  /// row actions that only make sense against real parsed cells (split
+  /// row, merge/split cells, OCR/layout source) and show "retract" in
+  /// their place.
+  bool get isInserted => sourceCellIds.length == 1 && sourceCellIds.first.startsWith('inserted-');
+
   PipelineTransaction copyWith({
     String? dateIso,
     String? description,

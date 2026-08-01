@@ -467,6 +467,78 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     state = state.copyWith(statement: statement.copyWith(transactions: updatedTransactions));
   }
 
+  /// Balance gaps between existing transactions -- GET /review/{id}/
+  /// missing-transaction-candidates (classification.
+  /// missing_transaction_detection). Stateless on the server, so this is
+  /// safe to call again after an insert/retract to see the list update;
+  /// nothing here is cached client-side.
+  Future<List<Map<String, dynamic>>> fetchMissingTransactionCandidates() async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to check for missing transactions.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    final response = await dio.get('/review/$documentId/missing-transaction-candidates');
+    return (response.data as List<dynamic>).cast<Map<String, dynamic>>();
+  }
+
+  /// Adds a transaction the parser missed entirely -- POST /review/{id}/
+  /// transaction/insert -- typically to fill a gap
+  /// fetchMissingTransactionCandidates() surfaced, but works standalone
+  /// too. Unlike editTransactionField (which patches one row by key),
+  /// this changes the row COUNT, so the statement is refreshed wholesale
+  /// from GET /transactions/{id}/reviewed afterward rather than merged.
+  Future<void> insertTransaction({
+    String? dateIso,
+    required String description,
+    double? debit,
+    double? credit,
+    double? balance,
+    String? category,
+    String? extractedName,
+  }) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to insert a transaction into.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post('/review/$documentId/transaction/insert', data: {
+      'date_iso': dateIso,
+      'description': description,
+      'debit': debit,
+      'credit': credit,
+      'balance': balance,
+      'category': category,
+      'extracted_name': extractedName,
+    });
+    await _refreshReviewedTransactions();
+  }
+
+  /// Undoes a wrongly-inserted transaction -- POST /review/{id}/
+  /// transaction/retract-insert. transactionRef is the target_ref
+  /// insertTransaction's own ReviewActionResponse returned (a synthetic
+  /// "inserted-`<uuid>`" id, not real source_cell_ids).
+  Future<void> retractInsertedTransaction(List<String> transactionRef) async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to retract a transaction from.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    await dio.post('/review/$documentId/transaction/retract-insert', data: {'transaction_ref': transactionRef});
+    await _refreshReviewedTransactions();
+  }
+
+  Future<void> _refreshReviewedTransactions() async {
+    final documentId = state.documentId;
+    final statement = state.statement;
+    if (documentId == null || statement == null) return;
+    final dio = _ref.read(apiClientProvider).dio;
+    final response = await dio.get('/transactions/$documentId/reviewed');
+    final rows = (response.data as List<dynamic>).cast<Map<String, dynamic>>();
+    final transactions = rows.map((r) => PipelineTransaction.fromJson(r)).toList();
+    state = state.copyWith(statement: statement.copyWith(transactions: transactions));
+  }
+
   void reset() => state = const WorkflowState();
 }
 

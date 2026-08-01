@@ -43,6 +43,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   final Map<String, _CellStatus> _cellStatus = {};
   bool _verifying = false;
   bool _enhancingNames = false;
+  bool _checkingMissing = false;
 
   /// Keyed by rowKey. Selection is shared by two different actions with
   /// different backend gates: bulk-approve/bulk-reject (reviewer/admin
@@ -208,6 +209,21 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                     ),
                     const SizedBox(width: 10),
                     Tooltip(
+                      message: 'Finds balance gaps between transactions -- somewhere a transaction the '
+                          'parser missed likely belongs -- and lets you insert one to fill it.',
+                      child: OutlinedButton(
+                        onPressed: _checkingMissing ? null : _checkMissingTransactions,
+                        child: _checkingMissing
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('🔎 Missing Transactions'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Tooltip(
                       message: workflow.documentTypeId == null
                           ? 'This document could not be auto-classified, so it can\'t be verified.'
                           : 'Marks this document verified and trains a template from it.',
@@ -306,6 +322,12 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _editableCell(t, 'description', t.description, alignLeft: true),
+                    if (t.isInserted)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4, top: 2),
+                        child: Text('🧩 Inserted by reviewer',
+                            style: TextStyle(fontSize: 10, color: AppColors.muted, fontStyle: FontStyle.italic)),
+                      ),
                     if (t.extractedName != null && t.extractedName!.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(left: 4, top: 2),
@@ -321,7 +343,11 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 _editableCell(t, 'balance', _formatAmount(t.balance)),
                 Row(
                   mainAxisSize: MainAxisSize.min,
-                  children: [_flagButton(t), _sourceButton(t), _layoutToolsButton(t)],
+                  children: [
+                    _flagButton(t),
+                    if (!t.isInserted) _sourceButton(t),
+                    _layoutToolsButton(t),
+                  ],
                 ),
               ],
             ),
@@ -489,6 +515,23 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   }
 
   Widget _layoutToolsButton(PipelineTransaction transaction) {
+    // A reviewer-inserted row (see insertTransaction) has no real layout
+    // cells behind it -- split/merge/split-cell all operate on actual
+    // source_cell_ids, so none of them apply. Its only row-shape action
+    // is undoing the insertion entirely.
+    if (transaction.isInserted) {
+      return PopupMenuButton<String>(
+        icon: Icon(Icons.grid_view_outlined, size: 16, color: AppColors.muted),
+        tooltip: 'This row was inserted by a reviewer',
+        padding: EdgeInsets.zero,
+        onSelected: (action) {
+          if (action == 'retract') _retractInsertedRow(transaction);
+        },
+        itemBuilder: (context) => const [
+          PopupMenuItem(value: 'retract', child: Text('Retract this inserted row...', style: TextStyle(fontSize: 12))),
+        ],
+      );
+    }
     return PopupMenuButton<String>(
       icon: Icon(Icons.grid_view_outlined, size: 16, color: AppColors.muted),
       tooltip: 'Split this row, merge cells, or split a cell',
@@ -792,6 +835,195 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     }
   }
 
+  Future<void> _checkMissingTransactions() async {
+    setState(() => _checkingMissing = true);
+    List<Map<String, dynamic>> candidates;
+    try {
+      candidates = await ref.read(workflowControllerProvider.notifier).fetchMissingTransactionCandidates();
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not check for missing transactions: $error');
+      return;
+    } finally {
+      if (mounted) setState(() => _checkingMissing = false);
+    }
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (context) => _MissingTransactionsDialog(
+        candidates: candidates,
+        onInsert: (candidate) {
+          Navigator.pop(context);
+          _insertTransactionDialog(candidate: candidate);
+        },
+        onInsertManually: () {
+          Navigator.pop(context);
+          _insertTransactionDialog();
+        },
+      ),
+    );
+  }
+
+  /// candidate (when given) is one entry from GET .../missing-
+  /// transaction-candidates -- pre-fills the suggested debit/credit and
+  /// the two bracketing dates as a starting point; description/exact
+  /// date are always left for the reviewer to fill in, since nothing on
+  /// the backend re-reads the source document to recover them.
+  Future<void> _insertTransactionDialog({Map<String, dynamic>? candidate}) async {
+    final dateController = TextEditingController(text: candidate?['prev_date_iso'] as String? ?? '');
+    final descriptionController = TextEditingController();
+    final debitController = TextEditingController(
+      text: _formatAmountForInput((candidate?['suggested_debit'] as num?)?.toDouble()),
+    );
+    final creditController = TextEditingController(
+      text: _formatAmountForInput((candidate?['suggested_credit'] as num?)?.toDouble()),
+    );
+    final balanceController = TextEditingController();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Insert a transaction'),
+        content: SizedBox(
+          width: 360,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (candidate != null) ...[
+                  Text(
+                    'Between ${candidate['prev_date_iso'] ?? '?'} (${_formatAmount((candidate['prev_balance'] as num?)?.toDouble())}) '
+                    'and ${candidate['next_date_iso'] ?? '?'} (${_formatAmount((candidate['next_balance'] as num?)?.toDouble())}) -- '
+                    'unexplained gap of ${_formatAmount((candidate['gap_amount'] as num?)?.toDouble())}.',
+                    style: TextStyle(fontSize: 12, color: AppColors.muted),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                TextField(
+                  controller: dateController,
+                  decoration: const InputDecoration(labelText: 'Date (YYYY-MM-DD)', isDense: true),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: descriptionController,
+                  autofocus: true,
+                  decoration: const InputDecoration(labelText: 'Description', isDense: true),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: debitController,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        decoration: const InputDecoration(labelText: 'Debit', isDense: true),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: creditController,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        decoration: const InputDecoration(labelText: 'Credit', isDense: true),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: balanceController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: 'Balance (optional)', isDense: true),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Insert')),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      dateController.dispose();
+      descriptionController.dispose();
+      debitController.dispose();
+      creditController.dispose();
+      balanceController.dispose();
+      return;
+    }
+
+    final description = descriptionController.text.trim();
+    final dateIso = dateController.text.trim();
+    final debit = double.tryParse(debitController.text.trim());
+    final credit = double.tryParse(creditController.text.trim());
+    final balance = double.tryParse(balanceController.text.trim());
+    dateController.dispose();
+    descriptionController.dispose();
+    debitController.dispose();
+    creditController.dispose();
+    balanceController.dispose();
+
+    if (description.isEmpty) {
+      _showError('A description is required to insert a transaction.');
+      return;
+    }
+
+    try {
+      await ref.read(workflowControllerProvider.notifier).insertTransaction(
+            dateIso: dateIso.isEmpty ? null : dateIso,
+            description: description,
+            debit: debit,
+            credit: credit,
+            balance: balance,
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Transaction inserted.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not insert transaction: $error');
+    }
+  }
+
+  Future<void> _retractInsertedRow(PipelineTransaction transaction) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Retract this inserted row?'),
+        content: const Text('This removes the row you inserted. It can be re-inserted later if needed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.red),
+            child: const Text('Retract'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await ref.read(workflowControllerProvider.notifier).retractInsertedTransaction(transaction.sourceCellIds);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Inserted row retracted.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Could not retract row: $error');
+    }
+  }
+
+  String _formatAmountForInput(double? value) {
+    if (value == null || value == 0.0) return '';
+    return value.toStringAsFixed(2);
+  }
+
   Future<void> _verify() async {
     setState(() => _verifying = true);
     try {
@@ -1072,4 +1304,88 @@ class _SourceDialogState extends State<_SourceDialog> {
           ],
         ),
       );
+}
+
+/// Lists every balance gap GET .../missing-transaction-candidates
+/// found -- each with an Insert button that hands the candidate off to
+/// _ReviewScreenState._insertTransactionDialog for pre-filling -- plus
+/// a standalone "insert manually" action for a row a reviewer spots by
+/// eye that never showed up as a balance mismatch.
+class _MissingTransactionsDialog extends StatelessWidget {
+  const _MissingTransactionsDialog({
+    required this.candidates,
+    required this.onInsert,
+    required this.onInsertManually,
+  });
+
+  final List<Map<String, dynamic>> candidates;
+  final void Function(Map<String, dynamic> candidate) onInsert;
+  final VoidCallback onInsertManually;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Missing transactions'),
+      content: SizedBox(
+        width: 420,
+        child: candidates.isEmpty
+            ? Text(
+                'No balance gaps found -- every transaction\'s running balance reconciles with the one before it.',
+                style: TextStyle(fontSize: 12, color: AppColors.muted),
+              )
+            : SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'The running balance doesn\'t add up between these rows -- a transaction the parser '
+                      'missed likely belongs in the gap. Description and exact date aren\'t recoverable here; '
+                      'fill those in when you insert.',
+                      style: TextStyle(fontSize: 11.5, color: AppColors.muted),
+                    ),
+                    const SizedBox(height: 10),
+                    for (final c in candidates)
+                      Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        color: AppColors.panel2,
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '${c['prev_date_iso'] ?? '?'} → ${c['next_date_iso'] ?? '?'}',
+                                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                                    ),
+                                    Text(
+                                      'Gap: ${(c['gap_amount'] as num?)?.toStringAsFixed(2) ?? '?'} '
+                                      '(${(c['suggested_credit'] as num?) != null && (c['suggested_credit'] as num) > 0 ? 'likely credit' : 'likely debit'})',
+                                      style: TextStyle(fontSize: 11.5, color: AppColors.muted),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              OutlinedButton(
+                                onPressed: () => onInsert(c),
+                                child: const Text('Insert', style: TextStyle(fontSize: 12)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+      ),
+      actions: [
+        TextButton(onPressed: onInsertManually, child: const Text('+ Insert Manually')),
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+      ],
+    );
+  }
 }
