@@ -1,3 +1,6 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -10,20 +13,28 @@ import '../screens/reports/reports_screen.dart';
 import '../screens/review/review_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/splash/splash_screen.dart';
+import '../screens/starting/starting_screen.dart';
 import '../screens/summary/summary_screen.dart';
 import '../screens/templates/template_manager_screen.dart';
 import '../screens/upload/upload_screen.dart';
 import '../state/auth_state.dart';
 
+/// Standalone Windows desktop build only (Phase 9) -- gates whether
+/// /starting (wait for the embedded backend subprocess) is even in the
+/// startup path. The web build and every other platform go straight to
+/// /splash exactly as before this feature existed.
+bool get _isDesktopBuild => !kIsWeb && Platform.isWindows;
+
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
-    initialLocation: '/splash',
+    initialLocation: _isDesktopBuild ? '/starting' : '/splash',
     refreshListenable: _AuthChangeNotifier(ref),
     redirect: (context, state) {
-      // The splash screen (HTML source: #splashOverlay) always plays once
-      // on launch regardless of auth state — it drives its own timing and
-      // hands off via onComplete, so the auth redirect below must not
-      // pre-empt it.
+      // /starting (desktop only) and /splash both always play once on
+      // launch regardless of auth state -- they drive their own timing
+      // and hand off via context.go(...), so the auth redirect below
+      // must not pre-empt either.
+      if (state.matchedLocation == '/starting') return null;
       if (state.matchedLocation == '/splash') return null;
 
       final authState = ref.read(authControllerProvider);
@@ -36,6 +47,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
+      GoRoute(path: '/starting', builder: (context, state) => const StartingScreen()),
       GoRoute(
         path: '/splash',
         builder: (context, state) => SplashScreen(onComplete: () => context.go('/login')),

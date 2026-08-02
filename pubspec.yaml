@@ -51,6 +51,9 @@ dependencies:
   file_picker: ^8.1.6
   # Cross-platform drag-and-drop file support for the Upload zone.
   desktop_drop: ^0.5.0
+  # Resolves %LOCALAPPDATA%-equivalent paths for the standalone desktop
+  # build's embedded backend (Phase 9) -- backend_launcher.dart.
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:

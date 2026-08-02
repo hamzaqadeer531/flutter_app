@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -97,12 +99,41 @@ class AuthController extends StateNotifier<AuthState> {
 
   Future<void> _restoreSession() async {
     final accessToken = await _storage.read(key: _accessTokenKey);
-    if (accessToken == null) {
-      state = const AuthState(isLoading: false);
+    if (accessToken != null) {
+      _apiClient.dio.options.headers['Authorization'] = 'Bearer $accessToken';
+      state = AuthState(user: _decodeUser(accessToken), isLoading: false);
       return;
     }
-    _apiClient.dio.options.headers['Authorization'] = 'Bearer $accessToken';
-    state = AuthState(user: _decodeUser(accessToken), isLoading: false);
+
+    // Standalone Windows desktop build only (Phase 9) -- the web build
+    // (kIsWeb) keeps its real login screen untouched; so does every
+    // other platform. A fresh desktop install has no stored token yet,
+    // so this is where "double-click, no login screen" actually
+    // happens: GET /auth/bootstrap-credential 404s harmlessly unless
+    // run_desktop.py's own auto-provisioning wrote a real one (see that
+    // file's docstring), so this is a no-op everywhere except a genuine
+    // desktop install.
+    if (!kIsWeb && Platform.isWindows) {
+      final autoLoggedIn = await _tryDesktopAutoLogin();
+      if (autoLoggedIn) return;
+    }
+
+    state = const AuthState(isLoading: false);
+  }
+
+  Future<bool> _tryDesktopAutoLogin() async {
+    try {
+      final response = await _apiClient.dio.get('/auth/bootstrap-credential');
+      final email = response.data['email'] as String;
+      final password = response.data['password'] as String;
+      await login(email, password);
+      return true;
+    } on DioException {
+      // No bootstrap credential configured (not a desktop install after
+      // all) or the embedded backend isn't reachable yet -- fall
+      // through to the normal login screen rather than hang here.
+      return false;
+    }
   }
 
   Future<void> login(String email, String password) async {

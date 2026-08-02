@@ -1,8 +1,13 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../state/auth_state.dart';
 import '../../state/settings_state.dart';
 import '../../theme/app_colors.dart';
+import '../../widgets/app_alert.dart';
 import '../../widgets/app_card.dart';
 import '../../widgets/app_main.dart';
 import '../../widgets/app_shell.dart';
@@ -12,11 +17,16 @@ import '../../widgets/app_shell.dart';
 /// app's screen-per-route navigation instead of the HTML wizard's
 /// overlay modals. Every toggle name/default matches the HTML's
 /// `SETTINGS` JS object exactly.
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  @override
+  Widget build(BuildContext context) {
     final settings = ref.watch(settingsControllerProvider);
     final controller = ref.read(settingsControllerProvider.notifier);
 
@@ -75,6 +85,16 @@ class SettingsScreen extends ConsumerWidget {
                 ],
               ),
             ),
+            // Standalone Windows desktop build only (Phase 9) -- the
+            // hosted/web build configures Gemini via the backend's own
+            // env vars (config.py), set by whoever runs the server, so
+            // this card would be meaningless (and the backing endpoint
+            // 400s) there. Same `!kIsWeb && Platform.isWindows` gate
+            // app_router.dart/auth_state.dart already use.
+            if (!kIsWeb && Platform.isWindows) ...[
+              const SizedBox(height: 16),
+              const _GeminiKeyCard(),
+            ],
           ],
         ),
       ),
@@ -96,6 +116,150 @@ class SettingsScreen extends ConsumerWidget {
             ),
           ),
           Switch(value: value, activeThumbColor: AppColors.accent, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
+}
+
+class _GeminiKeyCard extends ConsumerStatefulWidget {
+  const _GeminiKeyCard();
+
+  @override
+  ConsumerState<_GeminiKeyCard> createState() => _GeminiKeyCardState();
+}
+
+class _GeminiKeyCardState extends ConsumerState<_GeminiKeyCard> {
+  final _apiKeyController = TextEditingController();
+  bool _loading = true;
+  bool _saving = false;
+  bool _enabled = false;
+  bool _configured = false;
+  String? _error;
+  String? _success;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _apiKeyController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/settings/gemini-key');
+      final body = response.data as Map<String, dynamic>;
+      setState(() {
+        _enabled = body['enabled'] as bool;
+        _configured = body['configured'] as bool;
+        _error = null;
+      });
+    } catch (error) {
+      setState(() => _error = 'Could not load Gemini status: $error');
+    } finally {
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _save({String? apiKey, required bool enabled}) async {
+    setState(() {
+      _saving = true;
+      _error = null;
+      _success = null;
+    });
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final requestBody = <String, dynamic>{'enabled': enabled};
+      if (apiKey != null) requestBody['api_key'] = apiKey;
+      final response = await dio.put('/settings/gemini-key', data: requestBody);
+      final body = response.data as Map<String, dynamic>;
+      setState(() {
+        _enabled = body['enabled'] as bool;
+        _configured = body['configured'] as bool;
+        _apiKeyController.clear();
+        _success = 'Saved.';
+      });
+    } catch (error) {
+      setState(() => _error = 'Save failed: $error');
+    } finally {
+      setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const AppCardHeader(
+            icon: '✨',
+            title: 'Gemini AI',
+            subtitle: 'Optional cloud assist (chat, AI validation/recovery). The key is encrypted and stored only on this PC.',
+          ),
+          ?_error != null ? AppAlert(kind: AppAlertKind.error, message: _error!) : null,
+          ?_success != null ? AppAlert(kind: AppAlertKind.success, message: _success!) : null,
+          if (_loading)
+            const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: LinearProgressIndicator())
+          else ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Enable Gemini',
+                            style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: AppColors.heading)),
+                        Text(
+                          _configured ? 'A key is configured on this device.' : 'No key configured yet — enter one below.',
+                          style: TextStyle(fontSize: 11.5, color: AppColors.muted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(
+                    value: _enabled,
+                    activeThumbColor: AppColors.accent,
+                    onChanged: _saving || (!_configured && !_enabled) ? null : (v) => _save(enabled: v),
+                  ),
+                ],
+              ),
+            ),
+            TextField(
+              controller: _apiKeyController,
+              obscureText: true,
+              style: const TextStyle(fontSize: 13, color: AppColors.heading),
+              decoration: const InputDecoration(
+                labelText: 'Gemini API key',
+                hintText: 'Paste a new key to replace the stored one',
+                isDense: true,
+              ),
+              // Rebuilds so the Save button's disabled-when-empty state
+              // (below) tracks what's actually typed, not just the last
+              // full-widget rebuild.
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                onPressed: _saving || _apiKeyController.text.trim().isEmpty
+                    ? null
+                    : () => _save(apiKey: _apiKeyController.text.trim(), enabled: true),
+                child: Text(_saving ? 'Saving...' : 'Save key'),
+              ),
+            ),
+          ],
         ],
       ),
     );
