@@ -5,8 +5,10 @@ import 'package:go_router/go_router.dart';
 
 import '../../models/insight_model.dart';
 import '../../models/internal_transfer_model.dart';
+import '../../models/monthly_summary_model.dart';
 import '../../models/pipeline_models.dart';
 import '../../models/recurring_transaction_model.dart';
+import '../../models/verification_models.dart';
 import '../../state/auth_state.dart';
 import '../../state/session_state.dart';
 import '../../state/workflow_state.dart';
@@ -45,6 +47,16 @@ class _SummaryScreenState extends ConsumerState<SummaryScreen> {
   List<Insight>? _insights;
   bool _loadingInsights = false;
   String? _insightsError;
+
+  // Dashboard follow-up charts (session-scoped) -- reuses whatever of
+  // _transfers/_recurring above is already loaded rather than
+  // re-fetching, and adds two more session-wide sources: per-account
+  // verification (bank-wise volume + credit/debit category summaries)
+  // and the monthly credit/debit aggregation.
+  SessionVerification? _dashboardVerification;
+  List<MonthlySummary>? _monthlySummary;
+  bool _loadingDashboardExtras = false;
+  String? _dashboardExtrasError;
 
   Future<void> _loadTransfers() async {
     final sessionId = ref.read(sessionControllerProvider).sessionId;
@@ -124,6 +136,44 @@ class _SummaryScreenState extends ConsumerState<SummaryScreen> {
     }
   }
 
+  Future<void> _loadDashboardExtras() async {
+    final sessionId = ref.read(sessionControllerProvider).sessionId;
+    if (sessionId == null) {
+      setState(() => _dashboardExtrasError = 'No working session yet -- upload a statement first.');
+      return;
+    }
+    setState(() {
+      _loadingDashboardExtras = true;
+      _dashboardExtrasError = null;
+    });
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final results = await Future.wait([
+        dio.get('/sessions/$sessionId/verification'),
+        dio.get('/sessions/$sessionId/monthly-summary'),
+      ]);
+      final verification = SessionVerification.fromJson(results[0].data as Map<String, dynamic>);
+      final monthly = (results[1].data as List<dynamic>)
+          .map((e) => MonthlySummary.fromJson(e as Map<String, dynamic>))
+          .toList();
+      setState(() {
+        _dashboardVerification = verification;
+        _monthlySummary = monthly;
+        _loadingDashboardExtras = false;
+      });
+      // Recurring/Internal Transfer Trend reuse the same lists the
+      // Recurring Transactions / Internal Transfers tabs use -- load
+      // them too if this is the first tab the reviewer has opened.
+      if (_recurring == null && !_loadingRecurring) _loadRecurring();
+      if (_transfers == null && !_loadingTransfers) _loadTransfers();
+    } catch (error) {
+      setState(() {
+        _loadingDashboardExtras = false;
+        _dashboardExtrasError = 'Could not load dashboard data: $error';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final workflow = ref.watch(workflowControllerProvider);
@@ -190,7 +240,17 @@ class _SummaryScreenState extends ConsumerState<SummaryScreen> {
                     if (_tab == 0)
                       _ExecutiveSummaryTab(statement: statement, totalCredit: totalCredit, totalDebit: totalDebit)
                     else if (_tab == 1)
-                      _DashboardTab(statement: statement, totalCredit: totalCredit, totalDebit: totalDebit)
+                      _DashboardTab(
+                        statement: statement,
+                        totalCredit: totalCredit,
+                        totalDebit: totalDebit,
+                        verification: _dashboardVerification,
+                        monthlySummary: _monthlySummary,
+                        recurring: _recurring,
+                        transfers: _transfers,
+                        loadingExtras: _loadingDashboardExtras,
+                        extrasError: _dashboardExtrasError,
+                      )
                     else if (_tab == 2)
                       _loadingTransfers
                           ? const Center(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator(color: AppColors.accent)))
@@ -245,6 +305,9 @@ class _SummaryScreenState extends ConsumerState<SummaryScreen> {
           if (index == 4 && _insights == null && !_loadingInsights) {
             _loadInsights();
           }
+          if (index == 1 && _dashboardVerification == null && !_loadingDashboardExtras) {
+            _loadDashboardExtras();
+          }
         },
         style: OutlinedButton.styleFrom(
           backgroundColor: active ? AppColors.accentSubtle : AppColors.panel2,
@@ -294,79 +357,293 @@ class _ExecutiveSummaryTab extends StatelessWidget {
 }
 
 class _DashboardTab extends StatelessWidget {
-  const _DashboardTab({required this.statement, required this.totalCredit, required this.totalDebit});
+  const _DashboardTab({
+    required this.statement,
+    required this.totalCredit,
+    required this.totalDebit,
+    required this.verification,
+    required this.monthlySummary,
+    required this.recurring,
+    required this.transfers,
+    required this.loadingExtras,
+    required this.extrasError,
+  });
 
   final ParsedStatement statement;
   final double totalCredit;
   final double totalDebit;
 
+  // Session-scoped follow-up charts -- null while not yet loaded.
+  final SessionVerification? verification;
+  final List<MonthlySummary>? monthlySummary;
+  final List<RecurringTransaction>? recurring;
+  final List<InternalTransfer>? transfers;
+  final bool loadingExtras;
+  final String? extrasError;
+
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Wrap(
+      spacing: 20,
+      runSpacing: 20,
       children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('DEBIT VS CREDIT',
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.muted, letterSpacing: 0.5)),
-              const SizedBox(height: 10),
-              SizedBox(
-                height: 200,
-                child: (totalCredit + totalDebit) <= 0
-                    ? Center(child: Text('No amounts to chart yet.', style: TextStyle(color: AppColors.muted)))
-                    : PieChart(
-                        PieChartData(
-                          sections: [
-                            PieChartSectionData(value: totalCredit, color: AppColors.green, title: 'Credit', radius: 70),
-                            PieChartSectionData(value: totalDebit, color: AppColors.red, title: 'Debit', radius: 70),
-                          ],
-                        ),
-                      ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: 20),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('BALANCE OVER TIME',
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.muted, letterSpacing: 0.5)),
-              const SizedBox(height: 10),
-              SizedBox(
-                height: 200,
-                child: statement.transactions.isEmpty
-                    ? Center(child: Text('No transactions to chart yet.', style: TextStyle(color: AppColors.muted)))
-                    : LineChart(
-                        LineChartData(
-                          gridData: const FlGridData(show: false),
-                          titlesData: const FlTitlesData(show: false),
-                          borderData: FlBorderData(show: false),
-                          lineBarsData: [
-                            LineChartBarData(
-                              spots: [
-                                for (var i = 0; i < statement.transactions.length; i++)
-                                  if (statement.transactions[i].balance != null)
-                                    FlSpot(i.toDouble(), statement.transactions[i].balance!),
-                              ],
-                              isCurved: true,
-                              color: AppColors.accent,
-                              dotData: const FlDotData(show: false),
-                              belowBarData: BarAreaData(show: true, color: AppColors.accentSubtle),
-                            ),
-                          ],
-                        ),
-                      ),
-              ),
-            ],
-          ),
-        ),
+        _chartBox('DEBIT VS CREDIT', (totalCredit + totalDebit) <= 0
+            ? _emptyChart('No amounts to chart yet.')
+            : PieChart(
+                PieChartData(
+                  sections: [
+                    PieChartSectionData(value: totalCredit, color: AppColors.green, title: 'Credit', radius: 70),
+                    PieChartSectionData(value: totalDebit, color: AppColors.red, title: 'Debit', radius: 70),
+                  ],
+                ),
+              )),
+        _chartBox('BALANCE OVER TIME', statement.transactions.isEmpty
+            ? _emptyChart('No transactions to chart yet.')
+            : LineChart(
+                LineChartData(
+                  gridData: const FlGridData(show: false),
+                  titlesData: const FlTitlesData(show: false),
+                  borderData: FlBorderData(show: false),
+                  lineBarsData: [
+                    LineChartBarData(
+                      spots: [
+                        for (var i = 0; i < statement.transactions.length; i++)
+                          if (statement.transactions[i].balance != null)
+                            FlSpot(i.toDouble(), statement.transactions[i].balance!),
+                      ],
+                      isCurved: true,
+                      color: AppColors.accent,
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(show: true, color: AppColors.accentSubtle),
+                    ),
+                  ],
+                ),
+              )),
+        _chartBox('MONTHLY CASH FLOW', _sessionChartBody(child: _monthlyCashFlowChart())),
+        _chartBox('BANK-WISE TRANSACTION DISTRIBUTION', _sessionChartBody(child: _bankDistributionChart())),
+        _chartBox('CATEGORY-WISE SPENDING', _sessionChartBody(child: _categorySpendingChart())),
+        _chartBox('RECURRING TRANSACTION TREND', _recurringTrendChart()),
+        _chartBox('INTERNAL TRANSFER TREND', _internalTransferTrendChart()),
       ],
     );
   }
+
+  Widget _chartBox(String title, Widget child) {
+    return SizedBox(
+      width: 340,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.muted, letterSpacing: 0.5)),
+          const SizedBox(height: 10),
+          SizedBox(height: 200, child: child),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyChart(String message) => Center(child: Text(message, style: TextStyle(color: AppColors.muted)));
+
+  /// Wraps a chart that depends on session-scoped data (verification/
+  /// monthly-summary) with the shared loading/error/not-yet-loaded
+  /// states, so each of the 3 session-scoped charts doesn't repeat
+  /// this branching.
+  Widget _sessionChartBody({required Widget child}) {
+    if (loadingExtras) {
+      return const Center(child: CircularProgressIndicator(color: AppColors.accent));
+    }
+    if (extrasError != null) {
+      return Center(child: Text(extrasError!, style: TextStyle(fontSize: 11.5, color: AppColors.red)));
+    }
+    if (verification == null) {
+      return _emptyChart('No data yet.');
+    }
+    return child;
+  }
+
+  Widget _monthlyCashFlowChart() {
+    final months = monthlySummary ?? const [];
+    if (months.isEmpty) return _emptyChart('No dated transactions to chart yet.');
+    final maxValue = months.fold<double>(
+      0, (m, r) => [m, r.totalCredits, r.totalDebits].reduce((a, b) => a > b ? a : b));
+    return BarChart(
+      BarChartData(
+        gridData: const FlGridData(show: false),
+        borderData: FlBorderData(show: false),
+        maxY: maxValue <= 0 ? 1 : maxValue * 1.15,
+        titlesData: FlTitlesData(
+          leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 26,
+              getTitlesWidget: (value, meta) {
+                final i = value.toInt();
+                if (i < 0 || i >= months.length) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(months[i].month.substring(5), style: TextStyle(fontSize: 9, color: AppColors.muted)),
+                );
+              },
+            ),
+          ),
+        ),
+        barGroups: [
+          for (var i = 0; i < months.length; i++)
+            BarChartGroupData(x: i, barRods: [
+              BarChartRodData(toY: months[i].totalCredits, color: AppColors.green, width: 7),
+              BarChartRodData(toY: months[i].totalDebits, color: AppColors.red, width: 7),
+            ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _bankDistributionChart() {
+    final accounts = verification?.accounts ?? const [];
+    if (accounts.isEmpty) return _emptyChart('Needs at least one processed account.');
+    final palette = [AppColors.accent, AppColors.green, AppColors.orange, AppColors.red, AppColors.muted];
+    return PieChart(
+      PieChartData(
+        sections: [
+          for (var i = 0; i < accounts.length; i++)
+            PieChartSectionData(
+              value: (accounts[i].bankSummary.creditCount + accounts[i].bankSummary.debitCount).toDouble(),
+              color: palette[i % palette.length],
+              title: accounts[i].bankSummary.bankName ?? accounts[i].filename,
+              radius: 70,
+              titleStyle: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _categorySpendingChart() {
+    final accounts = verification?.accounts ?? const [];
+    if (accounts.isEmpty) return _emptyChart('Needs at least one processed account.');
+    final byCategory = <String, double>{};
+    for (final account in accounts) {
+      for (final group in account.debitSummary) {
+        final key = group.category ?? 'Uncategorized';
+        byCategory[key] = (byCategory[key] ?? 0) + group.total;
+      }
+    }
+    if (byCategory.isEmpty) return _emptyChart('No debit categories to chart yet.');
+    final top = byCategory.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final shown = top.take(6).toList();
+    final maxValue = shown.first.value;
+    return BarChart(
+      BarChartData(
+        gridData: const FlGridData(show: false),
+        borderData: FlBorderData(show: false),
+        maxY: maxValue <= 0 ? 1 : maxValue * 1.15,
+        titlesData: FlTitlesData(
+          leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 40,
+              getTitlesWidget: (value, meta) {
+                final i = value.toInt();
+                if (i < 0 || i >= shown.length) return const SizedBox.shrink();
+                final label = shown[i].key.length > 8 ? '${shown[i].key.substring(0, 8)}…' : shown[i].key;
+                return Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Transform.rotate(
+                    angle: -0.5,
+                    child: Text(label, style: TextStyle(fontSize: 9, color: AppColors.muted)),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+        barGroups: [
+          for (var i = 0; i < shown.length; i++)
+            BarChartGroupData(x: i, barRods: [BarChartRodData(toY: shown[i].value, color: AppColors.orange, width: 14)]),
+        ],
+      ),
+    );
+  }
+
+  Widget _recurringTrendChart() {
+    if (loadingRecurring) return const Center(child: CircularProgressIndicator(color: AppColors.accent));
+    final items = recurring ?? const [];
+    if (items.isEmpty) return _emptyChart('No recurring transactions detected yet.');
+    final top = (List<RecurringTransaction>.from(items)..sort((a, b) => b.total.compareTo(a.total))).take(6).toList();
+    final maxValue = top.first.total;
+    return BarChart(
+      BarChartData(
+        gridData: const FlGridData(show: false),
+        borderData: FlBorderData(show: false),
+        maxY: maxValue <= 0 ? 1 : maxValue * 1.15,
+        titlesData: FlTitlesData(
+          leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 26,
+              getTitlesWidget: (value, meta) {
+                final i = value.toInt();
+                if (i < 0 || i >= top.length) return const SizedBox.shrink();
+                final label = top[i].description.length > 6 ? '${top[i].description.substring(0, 6)}…' : top[i].description;
+                return Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(label, style: TextStyle(fontSize: 9, color: AppColors.muted)),
+                );
+              },
+            ),
+          ),
+        ),
+        barGroups: [
+          for (var i = 0; i < top.length; i++)
+            BarChartGroupData(x: i, barRods: [
+              BarChartRodData(toY: top[i].total, color: AppColors.accent, width: 14),
+            ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _internalTransferTrendChart() {
+    if (loadingTransfers) return const Center(child: CircularProgressIndicator(color: AppColors.accent));
+    final items = transfers ?? const [];
+    if (items.isEmpty) return _emptyChart('No internal transfers detected yet.');
+    final sorted = List<InternalTransfer>.from(items)
+      ..sort((a, b) => (a.dateIso ?? '').compareTo(b.dateIso ?? ''));
+    return LineChart(
+      LineChartData(
+        gridData: const FlGridData(show: false),
+        titlesData: const FlTitlesData(show: false),
+        borderData: FlBorderData(show: false),
+        lineBarsData: [
+          LineChartBarData(
+            spots: [for (var i = 0; i < sorted.length; i++) FlSpot(i.toDouble(), sorted[i].amount)],
+            isCurved: false,
+            color: AppColors.orange,
+            barWidth: 2,
+            dotData: const FlDotData(show: true),
+            belowBarData: BarAreaData(show: true, color: AppColors.orangeSubtle),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // These two mirror the loading state of the sibling tabs' own
+  // fetches (Recurring Transactions / Internal Transfers) -- the
+  // Dashboard tab triggers those loads too (see _loadDashboardExtras),
+  // so its own trend charts show a spinner instead of a premature
+  // "none detected" while that fetch is still in flight.
+  bool get loadingRecurring => recurring == null && loadingExtras;
+  bool get loadingTransfers => transfers == null && loadingExtras;
 }
 
 class _InternalTransfersTab extends StatelessWidget {
