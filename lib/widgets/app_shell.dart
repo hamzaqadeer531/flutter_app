@@ -110,12 +110,15 @@ class _ScreenNavMenu extends StatelessWidget {
   static const _destinations = [
     ('/dashboard', '📊 Dashboard'),
     ('/upload', '📄 Upload Statement'),
+    ('/client-details', '🧾 Client Details'),
     ('/review', '🔍 Review Transactions'),
+    ('/verify', '✅ Verify & Check'),
     ('/summary', '📈 Analytics & Export'),
     ('/reports', '📤 Reports'),
     ('/templates', '🧩 Templates'),
     ('/dataset-manager', '🗂️ Dataset Manager'),
     ('/admin', '🛡️ Administration'),
+    ('/ai-dashboard', '🤖 AI Usage & Cost'),
     ('/settings', '⚙️ Settings'),
   ];
 

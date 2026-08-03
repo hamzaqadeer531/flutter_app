@@ -2,12 +2,24 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_colors.dart';
 
+/// The full 6-step sequence, matching the HTML source's `.steps` bar
+/// exactly (HTML feature-parity closure plan, Phase 3) -- every screen
+/// that shows WizardSteps passes this same array, with its own index
+/// into it and step-tap routing. Client Details (index 1) and Verify &
+/// Check (index 3) are their own real screens/routes as of this phase,
+/// not folded into Upload/Review the way an earlier pass of this
+/// migration originally scoped them.
+const wizardStepLabels = [
+  'Upload Statement',
+  'Client Details',
+  'Review Transactions',
+  'Verify & Check',
+  'Analytics & Insights',
+  'Export',
+];
+
 /// Matches the HTML source's `.steps`/`.step`/`.step-n` classes — the
-/// horizontal step tab bar above the wizard content (Upload -> Client
-/// Details -> Review -> Verify -> Analytics -> Export). "Client Details"
-/// and "Verify & Check" are folded into Upload/Review here rather than
-/// kept as separate steps, since this migration's screen list treats
-/// Upload, Review, and Summary as the three real screens.
+/// horizontal step tab bar above the wizard content.
 class WizardSteps extends StatelessWidget {
   const WizardSteps({super.key, required this.currentIndex, required this.labels, this.onStepTap});
 

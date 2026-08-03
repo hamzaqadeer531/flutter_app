@@ -16,6 +16,7 @@ class PipelineTransaction {
     this.transactionCode,
     this.extractedName,
     this.nameSource,
+    this.thresholdFlagged = false,
   });
 
   String? dateIso;
@@ -48,6 +49,14 @@ class PipelineTransaction {
   final String? chequeNumber;
   final String? transactionCode;
 
+  /// True if abs(debit or credit) >= the owning Working Session's
+  /// large_transaction_threshold (HTML feature-parity closure Phase 2 --
+  /// the "🚩" badge). Server-computed on every GET /transactions/{id}
+  /// and /reviewed fetch, same as category/extractedName -- not
+  /// recomputed client-side, so it goes stale exactly as long as those
+  /// already do between fetches.
+  final bool thresholdFlagged;
+
   factory PipelineTransaction.fromJson(Map<String, dynamic> json) {
     return PipelineTransaction(
       dateIso: json['date_iso'] as String?,
@@ -63,6 +72,7 @@ class PipelineTransaction {
       transactionCode: json['transaction_code'] as String?,
       extractedName: json['extracted_name'] as String?,
       nameSource: json['name_source'] as String?,
+      thresholdFlagged: json['threshold_flagged'] as bool? ?? false,
     );
   }
 
@@ -104,6 +114,7 @@ class PipelineTransaction {
       transactionCode: transactionCode,
       extractedName: extractedName ?? this.extractedName,
       nameSource: nameSource ?? this.nameSource,
+      thresholdFlagged: thresholdFlagged,
     );
   }
 }

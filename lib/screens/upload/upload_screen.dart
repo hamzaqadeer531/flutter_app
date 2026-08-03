@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../state/session_state.dart';
 import '../../state/workflow_state.dart';
 import '../../theme/app_colors.dart';
 import '../../widgets/app_alert.dart';
@@ -96,16 +97,20 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
   @override
   Widget build(BuildContext context) {
     final workflow = ref.watch(workflowControllerProvider);
+    final session = ref.watch(sessionControllerProvider);
 
     return AppShell(
       body: Column(
         children: [
           WizardSteps(
             currentIndex: 0,
-            labels: const ['Upload Statement', 'Review Transactions', 'Analytics & Export'],
+            labels: wizardStepLabels,
             onStepTap: (i) {
-              if (i == 1 && workflow.statement != null) context.go('/review');
-              if (i == 2 && workflow.statement != null) context.go('/summary');
+              if (i == 1 && session.sessionId != null) context.go('/client-details');
+              if (i == 2 && workflow.statement != null) context.go('/review');
+              if (i == 3 && session.sessionId != null) context.go('/verify');
+              if (i == 4 && workflow.statement != null) context.go('/summary');
+              if (i == 5 && workflow.statement != null) context.go('/reports');
             },
           ),
           Expanded(
@@ -271,12 +276,22 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
                                 : 'Result looks off? Try Tesseract OCR',
                           ),
                         ),
-                        ElevatedButton(
-                          onPressed: () => context.go('/review'),
-                          child: const Text('Next: Review Transactions →'),
+                        Row(
+                          children: [
+                            OutlinedButton(
+                              onPressed: () => ref.read(workflowControllerProvider.notifier).reset(),
+                              child: const Text('➕ Add Another Statement'),
+                            ),
+                            const SizedBox(width: 10),
+                            ElevatedButton(
+                              onPressed: () => context.go('/client-details'),
+                              child: const Text('Next: Client Details →'),
+                            ),
+                          ],
                         ),
                       ],
                     ),
+                  if (session.members.isNotEmpty) _UploadedStatementsCard(members: session.members),
                 ],
               ),
             ),
@@ -338,5 +353,68 @@ class _ExtractedDetailsCard extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// "Uploaded Statements" queue (HTML feature-parity closure plan, Phase
+/// 3) -- matches the HTML source's Step 1 accountStatements table
+/// (Bank/File/Status/Remove per row; Txns/Credits/Debits are left for a
+/// later phase once a lightweight per-member summary is worth fetching
+/// -- see SessionMemberSummary's own doc comment for why this stays
+/// client-side-only for now).
+class _UploadedStatementsCard extends ConsumerWidget {
+  const _UploadedStatementsCard({required this.members});
+
+  final List<SessionMemberSummary> members;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AppCardHeader(
+            icon: '🗂️',
+            title: 'Uploaded Statements',
+            subtitle: '${members.length} statement(s) in this working session',
+          ),
+          for (final member in members)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 2,
+                    child: Text(member.bankHint ?? 'Auto-Detect', style: const TextStyle(fontSize: 12.5, color: AppColors.heading)),
+                  ),
+                  Expanded(
+                    flex: 3,
+                    child: Text(member.filename, style: TextStyle(fontSize: 12.5, color: AppColors.muted), overflow: TextOverflow.ellipsis),
+                  ),
+                  Expanded(
+                    flex: 1,
+                    child: _statusChip(member.status),
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.close, size: 16, color: AppColors.muted),
+                    tooltip: 'Remove this statement',
+                    onPressed: () => ref.read(sessionControllerProvider.notifier).removeMember(member.documentId),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusChip(String status) {
+    final (label, color) = switch (status) {
+      'ready' => ('✓ Ready', AppColors.green),
+      'failed' => ('✕ Failed', AppColors.red),
+      _ => ('⏳ Processing', AppColors.orange),
+    };
+    return Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600));
   }
 }

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/pipeline_models.dart';
 import 'auth_state.dart';
+import 'session_state.dart';
 
 enum WorkflowStage { idle, uploading, ocr, layout, parsing, ready, failed }
 
@@ -96,18 +97,38 @@ class WorkflowController extends StateNotifier<WorkflowState> {
       final uploadResponse = await dio.post('/documents/upload', data: formData);
       final documentId = uploadResponse.data['document_id'] as String;
       final documentTypeId = uploadResponse.data['document_type_id'] as String?;
+      final sessionId = uploadResponse.data['session_id'] as String?;
       state = state.copyWith(
         documentId: documentId,
         documentTypeId: documentTypeId,
         stage: WorkflowStage.ocr,
         progressMessage: 'Reading document (OCR)...',
       );
+      // HTML feature-parity closure Phase 3 -- Phase 1's backend already
+      // stamped this upload with a (possibly brand new) Working Session;
+      // mirror that into the queue/Client Details state immediately,
+      // rather than waiting for the whole OCR/layout/parse pipeline to
+      // finish, so a failure partway through still leaves the statement
+      // visibly queued (status reflects the current stage below).
+      if (sessionId != null) {
+        _ref.read(sessionControllerProvider.notifier).onDocumentUploaded(
+              sessionId: sessionId,
+              documentId: documentId,
+              filename: filename,
+              bankHint: bank,
+              status: WorkflowStage.ocr.name,
+            );
+      }
       await _runOcrLayoutParse(dio, documentId, ocrEngine: ocrEngine, forceReprocess: false);
+      _ref.read(sessionControllerProvider.notifier).updateMemberStatus(documentId, WorkflowStage.ready.name);
     } catch (error) {
       final message = error is DioException && error.response?.statusCode == 401
           ? 'Your session just refreshed — please try uploading again.'
           : error.toString();
       state = state.copyWith(stage: WorkflowStage.failed, errorMessage: message);
+      if (state.documentId != null) {
+        _ref.read(sessionControllerProvider.notifier).updateMemberStatus(state.documentId!, WorkflowStage.failed.name);
+      }
     }
   }
 
@@ -544,6 +565,23 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     final dio = _ref.read(apiClientProvider).dio;
     final response = await dio.post('/review/$documentId/validate');
     return response.data as Map<String, dynamic>;
+  }
+
+  /// Local parser validation (semantic_parser/balance_validator.py) --
+  /// POST /parser/validate/{id}. Re-runs the SAME deterministic balance/
+  /// duplicate checks the Verify screen's reconciliation already relies
+  /// on, no Gemini call involved. HTML feature-parity closure Phase 12
+  /// folds these warning codes into the AI Validation dialog's
+  /// categorized report alongside Gemini's corrections, rather than
+  /// treating them as a separate feature.
+  Future<List<Map<String, dynamic>>> fetchParserValidationWarnings() async {
+    final documentId = state.documentId;
+    if (documentId == null) {
+      throw StateError('No active document to validate.');
+    }
+    final dio = _ref.read(apiClientProvider).dio;
+    final response = await dio.post('/parser/validate/$documentId');
+    return (response.data['warnings'] as List).cast<Map<String, dynamic>>();
   }
 
   /// AI Auto-Repair (Gemini Stage 3) -- POST /review/{id}/transaction/

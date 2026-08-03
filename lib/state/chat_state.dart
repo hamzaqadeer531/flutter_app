@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'auth_state.dart';
@@ -54,6 +57,61 @@ class ChatController extends StateNotifier<ChatState> {
         messages: [...historyIncludingUserTurn, ChatMessage(role: 'assistant', text: reply)],
         sending: false,
       );
+    } catch (error) {
+      state = state.copyWith(sending: false, error: error.toString());
+    }
+  }
+
+  /// Streaming counterpart to send() above (HTML feature-parity closure
+  /// Phase 11) -- POST /chat/{id}/stream, an SSE response of {"text":
+  /// "..."} chunks (or a terminal {"error": "..."} event -- see that
+  /// route's own docstring for why an error can't become an HTTP
+  /// status once streaming has started). The assistant's message
+  /// grows in place as chunks arrive, so the UI updates live instead
+  /// of waiting for the full reply.
+  Future<void> sendStreaming(String documentId, String text) async {
+    final userMessage = ChatMessage(role: 'user', text: text);
+    final historyIncludingUserTurn = [...state.messages, userMessage];
+    state = state.copyWith(messages: historyIncludingUserTurn, sending: true, error: null);
+
+    try {
+      final dio = _ref.read(apiClientProvider).dio;
+      final response = await dio.post<ResponseBody>(
+        '/chat/$documentId/stream',
+        data: {'messages': historyIncludingUserTurn.map((m) => m.toJson()).toList()},
+        options: Options(responseType: ResponseType.stream),
+      );
+
+      final buffer = StringBuffer();
+      var assistantText = '';
+      String? streamError;
+
+      await for (final chunkBytes in response.data!.stream) {
+        buffer.write(utf8.decode(chunkBytes, allowMalformed: true));
+        var content = buffer.toString();
+        var splitIndex = content.indexOf('\n\n');
+        while (splitIndex != -1) {
+          final rawEvent = content.substring(0, splitIndex).trim();
+          content = content.substring(splitIndex + 2);
+          if (rawEvent.startsWith('data: ')) {
+            final data = jsonDecode(rawEvent.substring(6)) as Map<String, dynamic>;
+            if (data.containsKey('text')) {
+              assistantText += data['text'] as String;
+              state = state.copyWith(
+                messages: [...historyIncludingUserTurn, ChatMessage(role: 'assistant', text: assistantText)],
+              );
+            } else if (data.containsKey('error')) {
+              streamError = data['error'] as String;
+            }
+          }
+          splitIndex = content.indexOf('\n\n');
+        }
+        buffer
+          ..clear()
+          ..write(content);
+      }
+
+      state = state.copyWith(sending: false, error: streamError);
     } catch (error) {
       state = state.copyWith(sending: false, error: error.toString());
     }

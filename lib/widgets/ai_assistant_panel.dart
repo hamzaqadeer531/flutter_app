@@ -5,16 +5,17 @@ import '../state/chat_state.dart';
 import '../theme/app_colors.dart';
 
 /// Conversational Q&A over the currently-loaded statement -- POST
-/// /chat/{documentId} (services/chat_service.py), backed by Gemini on
-/// the server. Stateless server-side: this dialog IS the conversation's
+/// /chat/{documentId}/stream (services/chat_service.py::ask_stream,
+/// HTML feature-parity closure Phase 11), backed by Gemini on the
+/// server. Stateless server-side: this dialog IS the conversation's
 /// only home (see ChatController's docstring) -- closing it keeps the
 /// history (ChatController isn't torn down), but a full app reload or a
 /// new document (see AppShell's ref.listen) loses it.
 ///
-/// v1 scope, matching the backend: no streaming (a plain request/
-/// response, so the reply appears all at once rather than token by
-/// token) and no file attachments (the loaded statement already IS the
-/// context, so there's nothing else to attach here).
+/// The reply streams in token-by-token rather than appearing all at
+/// once (ChatController.sendStreaming). No file attachments -- the
+/// loaded statement already IS the context, so there's nothing else to
+/// attach here.
 class AiAssistantPanel extends ConsumerStatefulWidget {
   const AiAssistantPanel({super.key, required this.documentId});
 
@@ -51,13 +52,14 @@ class _AiAssistantPanelState extends ConsumerState<AiAssistantPanel> {
     if (text.isEmpty) return;
     _inputController.clear();
     _scrollToBottom();
-    await ref.read(chatControllerProvider.notifier).send(widget.documentId, text);
+    await ref.read(chatControllerProvider.notifier).sendStreaming(widget.documentId, text);
     _scrollToBottom();
   }
 
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatControllerProvider);
+    ref.listen(chatControllerProvider.select((s) => s.messages), (_, _) => _scrollToBottom());
 
     return Dialog(
       backgroundColor: AppColors.panel,

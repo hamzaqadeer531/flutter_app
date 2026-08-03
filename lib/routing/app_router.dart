@@ -6,7 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../screens/admin/admin_screen.dart';
+import '../screens/ai_dashboard/ai_dashboard_screen.dart';
 import '../screens/auth/login_screen.dart';
+import '../screens/client_details/client_details_screen.dart';
 import '../screens/dashboard/dashboard_screen.dart';
 import '../screens/dataset/dataset_manager_screen.dart';
 import '../screens/reports/reports_screen.dart';
@@ -17,6 +19,7 @@ import '../screens/starting/starting_screen.dart';
 import '../screens/summary/summary_screen.dart';
 import '../screens/templates/template_manager_screen.dart';
 import '../screens/upload/upload_screen.dart';
+import '../screens/verify/verify_screen.dart';
 import '../state/auth_state.dart';
 
 /// Standalone Windows desktop build only (Phase 9) -- gates whether
@@ -55,13 +58,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
       GoRoute(path: '/dashboard', builder: (context, state) => const DashboardScreen()),
       GoRoute(path: '/upload', builder: (context, state) => const UploadScreen()),
+      GoRoute(path: '/client-details', builder: (context, state) => const ClientDetailsScreen()),
       GoRoute(path: '/review', builder: (context, state) => const ReviewScreen()),
+      GoRoute(path: '/verify', builder: (context, state) => const VerifyScreen()),
       GoRoute(path: '/summary', builder: (context, state) => const SummaryScreen()),
       GoRoute(path: '/reports', builder: (context, state) => const ReportsScreen()),
       GoRoute(path: '/settings', builder: (context, state) => const SettingsScreen()),
       GoRoute(path: '/templates', builder: (context, state) => const TemplateManagerScreen()),
       GoRoute(path: '/dataset-manager', builder: (context, state) => const DatasetManagerScreen()),
       GoRoute(path: '/admin', builder: (context, state) => const AdminScreen()),
+      GoRoute(path: '/ai-dashboard', builder: (context, state) => const AiDashboardScreen()),
     ],
   );
 });

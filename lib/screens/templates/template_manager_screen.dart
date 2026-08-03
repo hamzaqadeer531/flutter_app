@@ -34,6 +34,27 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
   bool _loadingList = false;
   bool _includeArchived = false;
 
+  // Template Debug Mode (HTML feature-parity closure Phase 10).
+  final _debugDocumentIdController = TextEditingController();
+  List<dynamic>? _debugResults;
+  bool _debugLoading = false;
+  String? _debugError;
+
+  // Training Mode (HTML feature-parity closure Phase 10) -- a manual
+  // column mapping keyed by the document's own already-detected layout
+  // column INDEX (visible via the Debug Match / parsed-document view),
+  // not a visual drag-and-drop picker -- a smaller, honest first cut
+  // rather than a slower, more polished column-highlighter UI.
+  final _trainDocumentIdController = TextEditingController();
+  final _trainNameController = TextEditingController();
+  final _trainDateController = TextEditingController();
+  final _trainDescriptionController = TextEditingController();
+  final _trainDebitController = TextEditingController();
+  final _trainCreditController = TextEditingController();
+  final _trainBalanceController = TextEditingController();
+  bool _trainLoading = false;
+  String? _trainStatus;
+
   @override
   void initState() {
     super.initState();
@@ -43,7 +64,83 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
   @override
   void dispose() {
     _idController.dispose();
+    _debugDocumentIdController.dispose();
+    _trainDocumentIdController.dispose();
+    _trainNameController.dispose();
+    _trainDateController.dispose();
+    _trainDescriptionController.dispose();
+    _trainDebitController.dispose();
+    _trainCreditController.dispose();
+    _trainBalanceController.dispose();
     super.dispose();
+  }
+
+  Future<void> _debugMatch() async {
+    final documentId = _debugDocumentIdController.text.trim();
+    if (documentId.isEmpty) return;
+    setState(() {
+      _debugLoading = true;
+      _debugError = null;
+      _debugResults = null;
+    });
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      final response = await dio.get('/templates/debug-match/$documentId');
+      setState(() => _debugResults = response.data as List<dynamic>);
+    } catch (error) {
+      setState(() => _debugError = 'Could not debug-match: $error');
+    } finally {
+      setState(() => _debugLoading = false);
+    }
+  }
+
+  Future<void> _saveTemplateFromMapping() async {
+    final documentId = _trainDocumentIdController.text.trim();
+    final name = _trainNameController.text.trim();
+    if (documentId.isEmpty || name.isEmpty) {
+      setState(() => _trainStatus = 'Document ID and a template name are both required.');
+      return;
+    }
+    final columnMapping = <String, int>{};
+    for (final (field, controller) in [
+      ('date', _trainDateController),
+      ('description', _trainDescriptionController),
+      ('debit', _trainDebitController),
+      ('credit', _trainCreditController),
+      ('balance', _trainBalanceController),
+    ]) {
+      final text = controller.text.trim();
+      if (text.isEmpty) continue;
+      final index = int.tryParse(text);
+      if (index == null) {
+        setState(() => _trainStatus = 'Column index for "$field" must be a whole number.');
+        return;
+      }
+      columnMapping[field] = index;
+    }
+    if (columnMapping.isEmpty) {
+      setState(() => _trainStatus = 'Map at least one column before saving.');
+      return;
+    }
+
+    setState(() {
+      _trainLoading = true;
+      _trainStatus = null;
+    });
+    try {
+      final dio = ref.read(apiClientProvider).dio;
+      await dio.post('/templates/from-mapping', data: {
+        'document_id': documentId,
+        'name': name,
+        'column_mapping': columnMapping,
+      });
+      setState(() => _trainStatus = 'Template "$name" saved -- future matching documents will parse using this mapping.');
+      await _loadTemplates();
+    } catch (error) {
+      setState(() => _trainStatus = 'Could not save template: $error');
+    } finally {
+      setState(() => _trainLoading = false);
+    }
   }
 
   Future<void> _loadTemplates() async {
@@ -273,6 +370,112 @@ class _TemplateManagerScreenState extends ConsumerState<TemplateManagerScreen> {
                     Padding(
                       padding: const EdgeInsets.only(top: 12),
                       child: AppAlert(kind: AppAlertKind.error, message: _error!),
+                    ),
+                ],
+              ),
+            ),
+            AppCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const AppCardHeader(
+                    icon: '🔍',
+                    title: 'Debug Match',
+                    subtitle: 'See every active template\'s score against a document, not just the winner.',
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _debugDocumentIdController,
+                          decoration: const InputDecoration(hintText: 'Document ID (UUID)'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      ElevatedButton(
+                        onPressed: _debugLoading ? null : _debugMatch,
+                        child: Text(_debugLoading ? 'Checking…' : 'Debug Match'),
+                      ),
+                    ],
+                  ),
+                  if (_debugError != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: AppAlert(kind: AppAlertKind.error, message: _debugError!),
+                    ),
+                  if (_debugResults != null) ...[
+                    const SizedBox(height: 12),
+                    if (_debugResults!.isEmpty)
+                      Text('No active templates for this document\'s type.', style: TextStyle(color: AppColors.muted))
+                    else
+                      for (final r in _debugResults!)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 3),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text('${r['template_id']} · v${r['version']} · ${r['scope']}',
+                                    style: const TextStyle(fontSize: 12, color: AppColors.text)),
+                              ),
+                              Text('${(r['score'] as num).toStringAsFixed(1)}%',
+                                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppColors.accent)),
+                            ],
+                          ),
+                        ),
+                  ],
+                ],
+              ),
+            ),
+            AppCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const AppCardHeader(
+                    icon: '🎓',
+                    title: 'Training Mode',
+                    subtitle: 'Manually map a document\'s detected columns to fields and save as a template -- '
+                        'future documents matching it will actually be parsed using this mapping.',
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _trainDocumentIdController,
+                          decoration: const InputDecoration(hintText: 'Source document ID (UUID)'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          controller: _trainNameController,
+                          decoration: const InputDecoration(hintText: 'Template name'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      SizedBox(width: 130, child: TextField(controller: _trainDateController, decoration: const InputDecoration(labelText: 'Date col #'))),
+                      SizedBox(width: 130, child: TextField(controller: _trainDescriptionController, decoration: const InputDecoration(labelText: 'Description col #'))),
+                      SizedBox(width: 130, child: TextField(controller: _trainDebitController, decoration: const InputDecoration(labelText: 'Debit col #'))),
+                      SizedBox(width: 130, child: TextField(controller: _trainCreditController, decoration: const InputDecoration(labelText: 'Credit col #'))),
+                      SizedBox(width: 130, child: TextField(controller: _trainBalanceController, decoration: const InputDecoration(labelText: 'Balance col #'))),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  ElevatedButton(
+                    onPressed: _trainLoading ? null : _saveTemplateFromMapping,
+                    child: Text(_trainLoading ? 'Saving…' : 'Save as Template'),
+                  ),
+                  if (_trainStatus != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: AppAlert(kind: AppAlertKind.info, message: _trainStatus!),
                     ),
                 ],
               ),

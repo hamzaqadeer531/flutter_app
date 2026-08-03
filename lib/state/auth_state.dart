@@ -57,7 +57,7 @@ class AuthController extends StateNotifier<AuthState> {
 
     final refreshToken = await _storage.read(key: _refreshTokenKey);
     if (refreshToken == null) {
-      await _forceSignOut();
+      await _forceSignOutAndRecover();
       return handler.next(error);
     }
 
@@ -85,7 +85,7 @@ class AuthController extends StateNotifier<AuthState> {
       final retryResponse = await _apiClient.dio.fetch(retryOptions);
       return handler.resolve(retryResponse);
     } on DioException {
-      await _forceSignOut();
+      await _forceSignOutAndRecover();
       return handler.next(error);
     }
   }
@@ -95,6 +95,28 @@ class AuthController extends StateNotifier<AuthState> {
     await _storage.delete(key: _refreshTokenKey);
     _apiClient.dio.options.headers.remove('Authorization');
     state = state.copyWith(clearUser: true, isLoading: false);
+  }
+
+  /// Clears the stale session, then -- standalone Windows desktop build
+  /// only -- immediately re-attempts the bootstrap-credential auto-login
+  /// instead of stranding the user on a login screen with no real
+  /// credentials to type in (this platform's whole point is "no login
+  /// screen, ever" -- see _restoreSession's own comment). Covers a real
+  /// scenario: flutter_secure_storage's data file lives outside the
+  /// app's install directory (confirmed: `%APPDATA%\CompanyName\
+  /// ProductName\flutter_secure_storage.dat`, untouched by uninstall),
+  /// so a stale token from a previous install/session can survive a
+  /// clean reinstall and get rejected by a freshly-provisioned backend
+  /// with no matching user/refresh-token record.
+  ///
+  /// Only used for INVOLUNTARY sign-outs (a rejected/expired token) --
+  /// logout() below calls _forceSignOut() directly, so an explicit "Log
+  /// out" click actually logs out instead of bouncing straight back in.
+  Future<void> _forceSignOutAndRecover() async {
+    await _forceSignOut();
+    if (!kIsWeb && Platform.isWindows) {
+      await _tryDesktopAutoLogin();
+    }
   }
 
   Future<void> _restoreSession() async {
@@ -121,19 +143,37 @@ class AuthController extends StateNotifier<AuthState> {
     state = const AuthState(isLoading: false);
   }
 
+  /// AuthController is created (and this runs) the instant the widget
+  /// tree first builds -- routerProvider's _AuthChangeNotifier reads
+  /// authControllerProvider to set up its refreshListenable, which
+  /// happens before StartingScreen ever gets a chance to build and
+  /// trigger backendLauncherProvider's creation (the thing that actually
+  /// spawns backend.exe). A single attempt here reliably hits a
+  /// connection error on every fresh launch -- confirmed by an actual
+  /// run where the backend's own log showed zero auth traffic at all,
+  /// meaning the request never even reached the server. Retries with the
+  /// same ~45s budget backend_launcher.dart's own /ready poll uses,
+  /// rather than giving up after one shot.
   Future<bool> _tryDesktopAutoLogin() async {
-    try {
-      final response = await _apiClient.dio.get('/auth/bootstrap-credential');
-      final email = response.data['email'] as String;
-      final password = response.data['password'] as String;
-      await login(email, password);
-      return true;
-    } on DioException {
-      // No bootstrap credential configured (not a desktop install after
-      // all) or the embedded backend isn't reachable yet -- fall
-      // through to the normal login screen rather than hang here.
-      return false;
+    const maxAttempts = 150;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        final response = await _apiClient.dio.get('/auth/bootstrap-credential');
+        final email = response.data['email'] as String;
+        final password = response.data['password'] as String;
+        await login(email, password);
+        return true;
+      } on DioException catch (e) {
+        // A real 404 means the server IS up but genuinely has no
+        // bootstrap credential configured (not a desktop install after
+        // all) -- stop immediately rather than retrying for 45s. Any
+        // other failure (connection refused, timeout) means the backend
+        // subprocess likely isn't up yet -- keep trying.
+        if (e.response?.statusCode == 404) return false;
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
     }
+    return false;
   }
 
   Future<void> login(String email, String password) async {

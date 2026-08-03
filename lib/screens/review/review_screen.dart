@@ -93,11 +93,14 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       body: Column(
         children: [
           WizardSteps(
-            currentIndex: 1,
-            labels: const ['Upload Statement', 'Review Transactions', 'Analytics & Export'],
+            currentIndex: 2,
+            labels: wizardStepLabels,
             onStepTap: (i) {
               if (i == 0) context.go('/upload');
-              if (i == 2) context.go('/summary');
+              if (i == 1) context.go('/client-details');
+              if (i == 3) context.go('/verify');
+              if (i == 4) context.go('/summary');
+              if (i == 5) context.go('/reports');
             },
           ),
           Expanded(
@@ -368,6 +371,12 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                           t.nameSource == 'ner' ? '🧠 ${t.extractedName}' : t.extractedName!,
                           style: TextStyle(fontSize: 10, color: AppColors.muted, fontStyle: FontStyle.italic),
                         ),
+                      ),
+                    if (t.thresholdFlagged)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4, top: 2),
+                        child: Text('🚩 Large transaction',
+                            style: TextStyle(fontSize: 10, color: AppColors.orange, fontStyle: FontStyle.italic)),
                       ),
                   ],
                 ),
@@ -871,8 +880,18 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   Future<void> _runAIValidation() async {
     setState(() => _validatingWithAI = true);
     Map<String, dynamic> result;
+    List<Map<String, dynamic>> parserWarnings;
     try {
-      result = await ref.read(workflowControllerProvider.notifier).validateWithAI();
+      final notifier = ref.read(workflowControllerProvider.notifier);
+      // Gemini's independent cross-check and the local deterministic
+      // balance/duplicate validator are unrelated failure surfaces --
+      // one failing shouldn't hide the other's real findings.
+      final results = await Future.wait([
+        notifier.validateWithAI(),
+        notifier.fetchParserValidationWarnings().catchError((_) => <Map<String, dynamic>>[]),
+      ]);
+      result = results[0] as Map<String, dynamic>;
+      parserWarnings = results[1] as List<Map<String, dynamic>>;
     } catch (error) {
       if (!mounted) return;
       _showError('AI Validation failed: $error');
@@ -881,10 +900,13 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       if (mounted) setState(() => _validatingWithAI = false);
     }
     if (!mounted) return;
+    final transactions = ref.read(workflowControllerProvider).statement?.transactions ?? const [];
     await showDialog(
       context: context,
       builder: (context) => _AIValidationDialog(
         result: result,
+        parserWarnings: parserWarnings,
+        transactions: transactions,
         onApply: (correction) async {
           try {
             await ref.read(workflowControllerProvider.notifier).applyAICorrection(
@@ -1521,16 +1543,88 @@ class _MissingTransactionsDialog extends StatelessWidget {
   }
 }
 
+/// Six validation-report categories (HTML feature-parity closure Phase
+/// 12) -- mirrors the HTML source's VALIDATION_LABELS exactly. Sourced
+/// from whichever signal already carries that information: the local
+/// deterministic balance validator's warning codes (missingBalance/
+/// impossibleBalance/duplicates), Gemini's own suggested-correction
+/// `kind` field (debitCreditConflict), and the already-loaded
+/// transaction list itself (invalidDate/ocrMistakes -- exactly what
+/// the HTML computed client-side too, just against real backend data
+/// here instead of a purely-local heuristic). Not a new backend
+/// endpoint -- pure client-side grouping over data every one of these
+/// three sources already returns.
+enum _ValidationCategory { missingBalance, invalidDate, impossibleBalance, debitCreditConflict, duplicates, ocrMistakes }
+
+const _validationCategoryLabels = {
+  _ValidationCategory.missingBalance: ('🧾', 'Missing balance'),
+  _ValidationCategory.invalidDate: ('📅', 'Invalid date'),
+  _ValidationCategory.impossibleBalance: ('⚖️', 'Impossible balance'),
+  _ValidationCategory.debitCreditConflict: ('↔️', 'Debit/Credit conflict'),
+  _ValidationCategory.duplicates: ('📑', 'Possible duplicate'),
+  _ValidationCategory.ocrMistakes: ('🔍', 'Possible OCR mistake'),
+};
+
+const _missingBalanceCodes = {'missing_opening_balance', 'missing_closing_balance', 'missing_transaction_balance'};
+const _impossibleBalanceCodes = {'balance_does_not_reconcile', 'closing_balance_mismatch'};
+const _lowConfidenceThreshold = 0.5;
+
+Map<_ValidationCategory, List<String>> _categorizeValidationFindings({
+  required List<Map<String, dynamic>> parserWarnings,
+  required List<Map<String, dynamic>> typeCorrections,
+  required List<PipelineTransaction> transactions,
+}) {
+  final buckets = {for (final c in _ValidationCategory.values) c: <String>[]};
+
+  for (final warning in parserWarnings) {
+    final code = warning['code'] as String?;
+    final message = warning['message'] as String? ?? code ?? 'Unknown issue';
+    if (_missingBalanceCodes.contains(code)) {
+      buckets[_ValidationCategory.missingBalance]!.add(message);
+    } else if (_impossibleBalanceCodes.contains(code)) {
+      buckets[_ValidationCategory.impossibleBalance]!.add(message);
+    } else if (code == 'possible_duplicate_transaction') {
+      buckets[_ValidationCategory.duplicates]!.add(message);
+    }
+  }
+
+  for (final correction in typeCorrections) {
+    buckets[_ValidationCategory.debitCreditConflict]!.add(
+      'Change type: ${correction['original_value']} → ${correction['suggested_value']}',
+    );
+  }
+
+  for (var i = 0; i < transactions.length; i++) {
+    final t = transactions[i];
+    if (t.dateIso == null || t.dateIso!.isEmpty) {
+      buckets[_ValidationCategory.invalidDate]!.add('Row ${i + 1}: ${t.description}');
+    }
+    if (t.confidence < _lowConfidenceThreshold) {
+      buckets[_ValidationCategory.ocrMistakes]!.add('Row ${i + 1}: ${t.description}');
+    }
+  }
+
+  return buckets;
+}
+
 /// Shows one AI Validation run's result (POST /review/{id}/validate) --
-/// overall confidence, summary, warnings, and every suggested
-/// correction with Apply/Dismiss. Applying calls back into
-/// _ReviewScreenState (onApply) to actually persist it (Gemini Stage
-/// 3/Auto-Repair); Dismiss is purely local, since nothing about a
-/// suggestion is ever saved server-side until Apply.
+/// overall confidence, summary, the categorized 6-bucket validation
+/// report (Phase 12), and every suggested correction with Apply/
+/// Dismiss. Applying calls back into _ReviewScreenState (onApply) to
+/// actually persist it (Gemini Stage 3/Auto-Repair); Dismiss is purely
+/// local, since nothing about a suggestion is ever saved server-side
+/// until Apply.
 class _AIValidationDialog extends StatefulWidget {
-  const _AIValidationDialog({required this.result, required this.onApply});
+  const _AIValidationDialog({
+    required this.result,
+    required this.parserWarnings,
+    required this.transactions,
+    required this.onApply,
+  });
 
   final Map<String, dynamic> result;
+  final List<Map<String, dynamic>> parserWarnings;
+  final List<PipelineTransaction> transactions;
   final Future<bool> Function(Map<String, dynamic> correction) onApply;
 
   @override
@@ -1540,11 +1634,21 @@ class _AIValidationDialog extends StatefulWidget {
 class _AIValidationDialogState extends State<_AIValidationDialog> {
   late List<Map<String, dynamic>> _corrections;
   final Set<int> _applying = {};
+  late Map<_ValidationCategory, List<String>> _categorized;
 
   @override
   void initState() {
     super.initState();
     _corrections = (widget.result['corrections'] as List? ?? []).cast<Map<String, dynamic>>();
+    _recategorize();
+  }
+
+  void _recategorize() {
+    _categorized = _categorizeValidationFindings(
+      parserWarnings: widget.parserWarnings,
+      typeCorrections: _corrections.where((c) => c['kind'] == 'type').toList(),
+      transactions: widget.transactions,
+    );
   }
 
   Future<void> _apply(int index) async {
@@ -1553,11 +1657,17 @@ class _AIValidationDialogState extends State<_AIValidationDialog> {
     if (!mounted) return;
     setState(() {
       _applying.remove(index);
-      if (applied) _corrections.removeAt(index);
+      if (applied) {
+        _corrections.removeAt(index);
+        _recategorize();
+      }
     });
   }
 
-  void _dismiss(int index) => setState(() => _corrections.removeAt(index));
+  void _dismiss(int index) => setState(() {
+        _corrections.removeAt(index);
+        _recategorize();
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -1590,6 +1700,8 @@ class _AIValidationDialogState extends State<_AIValidationDialog> {
                     child: Text('• $w', style: TextStyle(fontSize: 11.5, color: AppColors.muted)),
                   ),
               ],
+              const SizedBox(height: 12),
+              _ValidationReportSummary(categorized: _categorized),
               const SizedBox(height: 12),
               if (_corrections.isEmpty)
                 Text('No corrections suggested.', style: TextStyle(fontSize: 12, color: AppColors.muted))
@@ -1655,6 +1767,83 @@ class _AIValidationDialogState extends State<_AIValidationDialog> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The 6-category chip summary + expandable detail list (HTML feature-
+/// parity closure Phase 12) -- mirrors the HTML source's
+/// renderValidationCard()/openValidationReport() combined into one
+/// inline section rather than a chip-then-separate-modal, since this
+/// dialog already IS the "AI Validate" modal.
+class _ValidationReportSummary extends StatefulWidget {
+  const _ValidationReportSummary({required this.categorized});
+
+  final Map<_ValidationCategory, List<String>> categorized;
+
+  @override
+  State<_ValidationReportSummary> createState() => _ValidationReportSummaryState();
+}
+
+class _ValidationReportSummaryState extends State<_ValidationReportSummary> {
+  _ValidationCategory? _expanded;
+
+  @override
+  Widget build(BuildContext context) {
+    final nonEmpty = widget.categorized.entries.where((e) => e.value.isNotEmpty).toList();
+    final total = nonEmpty.fold<int>(0, (sum, e) => sum + e.value.length);
+    if (total == 0) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Validation Report', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.heading)),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final entry in nonEmpty)
+              InkWell(
+                onTap: () => setState(() => _expanded = _expanded == entry.key ? null : entry.key),
+                borderRadius: BorderRadius.circular(999),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: _expanded == entry.key ? AppColors.accentSubtle : AppColors.panel2,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Text(
+                    '${_validationCategoryLabels[entry.key]!.$1} ${_validationCategoryLabels[entry.key]!.$2} ${entry.value.length}',
+                    style: const TextStyle(fontSize: 11.5),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        if (_expanded != null) ...[
+          const SizedBox(height: 8),
+          Container(
+            constraints: const BoxConstraints(maxHeight: 160),
+            decoration: BoxDecoration(border: Border.all(color: AppColors.border), borderRadius: BorderRadius.circular(8)),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final item in widget.categorized[_expanded]!)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Text(item, style: TextStyle(fontSize: 11.5, color: AppColors.text)),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
