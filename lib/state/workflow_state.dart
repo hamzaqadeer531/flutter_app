@@ -19,6 +19,7 @@ class WorkflowState {
     this.progressMessage,
     this.errorMessage,
     this.statement,
+    this.nameEnhancementNote,
   });
 
   final WorkflowStage stage;
@@ -35,6 +36,13 @@ class WorkflowState {
   final String? errorMessage;
   final ParsedStatement? statement;
 
+  /// Soft, non-blocking status for the automatic post-upload NER name
+  /// enhancement pass (see _autoEnhanceNames below) -- deliberately kept
+  /// separate from errorMessage, since a failed background enhancement
+  /// (e.g. the bundled model isn't staged) must never look like the
+  /// whole upload failed. Null once cleared or on the next upload.
+  final String? nameEnhancementNote;
+
   bool get isBusy => stage == WorkflowStage.uploading || stage == WorkflowStage.ocr || stage == WorkflowStage.layout || stage == WorkflowStage.parsing;
 
   WorkflowState copyWith({
@@ -46,6 +54,8 @@ class WorkflowState {
     String? progressMessage,
     String? errorMessage,
     ParsedStatement? statement,
+    String? nameEnhancementNote,
+    bool clearNameEnhancementNote = false,
   }) {
     return WorkflowState(
       stage: stage ?? this.stage,
@@ -56,6 +66,7 @@ class WorkflowState {
       progressMessage: progressMessage,
       errorMessage: errorMessage,
       statement: statement ?? this.statement,
+      nameEnhancementNote: clearNameEnhancementNote ? null : (nameEnhancementNote ?? this.nameEnhancementNote),
     );
   }
 }
@@ -169,7 +180,21 @@ class WorkflowController extends StateNotifier<WorkflowState> {
     final parseResponse = await dio.post('/parser/parse/$documentId');
     final statement = ParsedStatement.fromJson(parseResponse.data['parsed_document'] as Map<String, dynamic>);
 
-    state = state.copyWith(stage: WorkflowStage.ready, statement: statement, progressMessage: null);
+    state = state.copyWith(stage: WorkflowStage.ready, statement: statement, progressMessage: null, clearNameEnhancementNote: true);
+
+    // HTML feature-parity: try NER-assisted name enhancement automatically
+    // right after every parse, instead of requiring the manual "Enhance
+    // Names (AI)" button click every time. Best-effort only -- this must
+    // never fail the upload itself; enhanceNames() already only fills
+    // gaps the always-on regex cascade left blank, so skipping it here
+    // just means those rows stay exactly as they already were.
+    try {
+      await enhanceNames();
+    } catch (error) {
+      state = state.copyWith(
+        nameEnhancementNote: 'Automatic name enhancement was skipped: $error',
+      );
+    }
   }
 
   /// Terminal job states the backend's JobManager can report (see

@@ -14,9 +14,20 @@ import '../../widgets/app_main.dart';
 import '../../widgets/app_shell.dart';
 import '../../widgets/wizard_steps.dart';
 
+/// null (the "Auto" option) means "don't force an engine" -- the
+/// backend's own ocr/document_intelligence_router.py then tries direct
+/// PDF text extraction first (fast, no OCR misreads on dense tables)
+/// and only falls back to Tesseract for a genuine scan/image. This
+/// used to hardcode 'tesseract' for "Auto", which silently forced OCR
+/// on every upload (including plain digital PDFs the router would
+/// otherwise have skipped straight to text extraction) and bypassed
+/// the router entirely -- a real bug, not the intended behavior (see
+/// that module's own docstring: "whenever the caller didn't force a
+/// specific engine").
 const _ocrEngineOptions = [
-  ('tesseract', 'Auto (Tesseract OCR)'),
-  ('pdf_text_layer', 'Digital PDF — Text Layer (no OCR)'),
+  (null, 'Auto (Recommended)'),
+  ('pdf_text_layer', 'Force Digital PDF — Text Layer (no OCR)'),
+  ('tesseract', 'Force OCR (Tesseract)'),
 ];
 
 const _bankOptions = [
@@ -48,7 +59,7 @@ class UploadScreen extends ConsumerStatefulWidget {
 
 class _UploadScreenState extends ConsumerState<UploadScreen> {
   String _selectedBank = _bankOptions.first;
-  String _selectedEngine = _ocrEngineOptions.first.$1;
+  String? _selectedEngine = _ocrEngineOptions.first.$1;
   bool _dragging = false;
 
   Future<void> _pickFile() async {
@@ -161,7 +172,7 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
                                       style: TextStyle(
                                           fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.muted, letterSpacing: 0.4)),
                                   const SizedBox(height: 5),
-                                  DropdownButtonFormField<String>(
+                                  DropdownButtonFormField<String?>(
                                     initialValue: _selectedEngine,
                                     dropdownColor: AppColors.panel2,
                                     style: const TextStyle(color: AppColors.text, fontSize: 13),
@@ -169,7 +180,7 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
                                       for (final engine in _ocrEngineOptions)
                                         DropdownMenuItem(value: engine.$1, child: Text(engine.$2)),
                                     ],
-                                    onChanged: workflow.isBusy ? null : (v) => setState(() => _selectedEngine = v!),
+                                    onChanged: workflow.isBusy ? null : (v) => setState(() => _selectedEngine = v),
                                   ),
                                 ],
                               ),

@@ -58,6 +58,18 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Soft, one-shot notice for the automatic post-upload name-enhancement
+    // pass (workflow_state.dart::_runOcrLayoutParse) -- deliberately a
+    // snackbar, not a persistent banner, since this never blocked the
+    // upload itself and the manual "Enhance Names (AI)" button below
+    // remains available as a retry.
+    ref.listen<WorkflowState>(workflowControllerProvider, (previous, next) {
+      if (next.nameEnhancementNote != null && next.nameEnhancementNote != previous?.nameEnhancementNote) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(next.nameEnhancementNote!), backgroundColor: AppColors.panel2),
+        );
+      }
+    });
     final workflow = ref.watch(workflowControllerProvider);
     final statement = workflow.statement;
     final role = ref.watch(authControllerProvider).user?.role;

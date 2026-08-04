@@ -2,12 +2,19 @@
 /// exactly (Analytics Dashboard follow-up, HTML feature-parity closure
 /// Phase 7 scope).
 class MonthlySummary {
-  MonthlySummary({required this.month, required this.totalCredits, required this.totalDebits, required this.net});
+  MonthlySummary({
+    required this.month,
+    required this.totalCredits,
+    required this.totalDebits,
+    required this.net,
+    required this.transactionCount,
+  });
 
   final String month; // "YYYY-MM"
   final double totalCredits;
   final double totalDebits;
   final double net;
+  final int transactionCount;
 
   factory MonthlySummary.fromJson(Map<String, dynamic> json) {
     return MonthlySummary(
@@ -15,6 +22,7 @@ class MonthlySummary {
       totalCredits: (json['total_credits'] as num?)?.toDouble() ?? 0.0,
       totalDebits: (json['total_debits'] as num?)?.toDouble() ?? 0.0,
       net: (json['net'] as num?)?.toDouble() ?? 0.0,
+      transactionCount: (json['transaction_count'] as num?)?.toInt() ?? 0,
     );
   }
 }

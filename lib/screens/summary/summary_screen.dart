@@ -136,6 +136,17 @@ class _SummaryScreenState extends ConsumerState<SummaryScreen> {
     }
   }
 
+  @override
+  void initState() {
+    super.initState();
+    // Executive Summary (the default tab) needs the corrected opening/
+    // closing balance from session verification too, not just the
+    // Dashboard tab -- previously this only loaded once a reviewer
+    // clicked into Dashboard, so Executive Summary's balance stat cards
+    // could sit stale on the raw parse-time snapshot indefinitely.
+    _loadDashboardExtras();
+  }
+
   Future<void> _loadDashboardExtras() async {
     final sessionId = ref.read(sessionControllerProvider).sessionId;
     if (sessionId == null) {
@@ -238,7 +249,12 @@ class _SummaryScreenState extends ConsumerState<SummaryScreen> {
                     ),
                     const Divider(color: AppColors.border, height: 24),
                     if (_tab == 0)
-                      _ExecutiveSummaryTab(statement: statement, totalCredit: totalCredit, totalDebit: totalDebit)
+                      _ExecutiveSummaryTab(
+                        statement: statement,
+                        totalCredit: totalCredit,
+                        totalDebit: totalDebit,
+                        verification: _dashboardVerification,
+                      )
                     else if (_tab == 1)
                       _DashboardTab(
                         statement: statement,
@@ -320,14 +336,38 @@ class _SummaryScreenState extends ConsumerState<SummaryScreen> {
 }
 
 class _ExecutiveSummaryTab extends StatelessWidget {
-  const _ExecutiveSummaryTab({required this.statement, required this.totalCredit, required this.totalDebit});
+  const _ExecutiveSummaryTab({
+    required this.statement,
+    required this.totalCredit,
+    required this.totalDebit,
+    required this.verification,
+  });
 
   final ParsedStatement statement;
   final double totalCredit;
   final double totalDebit;
 
+  /// Session-scoped verification (GET /sessions/{id}/verification) --
+  /// null until it's loaded. Its bank_summary.opening/closing_balance
+  /// reflects any manual correction made on the Verify screen
+  /// (ReviewService.edit_statement_metadata); `statement`'s own
+  /// openingBalance/closingBalance is a one-time snapshot taken at parse
+  /// time and never updates after a correction, so this is preferred
+  /// whenever it's available for a single-account session. Multi-account
+  /// sessions have no single well-defined opening/closing balance (same
+  /// reason the HTML source's own Executive Summary only ever shows a
+  /// summed Closing Balance for those), so this falls back to the raw
+  /// per-document snapshot there.
+  final SessionVerification? verification;
+
   @override
   Widget build(BuildContext context) {
+    final correctedAccount = verification != null && verification!.accounts.length == 1
+        ? verification!.accounts.first.bankSummary
+        : null;
+    final openingBalance = correctedAccount?.openingBalance ?? statement.openingBalance;
+    final closingBalance = correctedAccount?.closingBalance ?? statement.closingBalance;
+
     return Wrap(
       spacing: 12,
       runSpacing: 12,
@@ -341,10 +381,10 @@ class _ExecutiveSummaryTab extends StatelessWidget {
             child: StatCard(label: 'Total Debits', value: totalDebit.toStringAsFixed(2), valueColor: AppColors.red)),
         SizedBox(
             width: 220,
-            child: StatCard(label: 'Opening Balance', value: statement.openingBalance?.toStringAsFixed(2) ?? '—')),
+            child: StatCard(label: 'Opening Balance', value: openingBalance?.toStringAsFixed(2) ?? '—')),
         SizedBox(
             width: 220,
-            child: StatCard(label: 'Closing Balance', value: statement.closingBalance?.toStringAsFixed(2) ?? '—')),
+            child: StatCard(label: 'Closing Balance', value: closingBalance?.toStringAsFixed(2) ?? '—')),
         SizedBox(
             width: 220,
             child: StatCard(
